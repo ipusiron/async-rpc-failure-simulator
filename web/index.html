@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Async RPC Failure Simulator - Visual Demo</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            color: #00d4ff;
+        }
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 30px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 14px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: bold;
+        }
+        button:hover {
+            transform: translateY(-2px);
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .btn-vulnerable {
+            background: #ff4757;
+            color: white;
+        }
+        .btn-secure {
+            background: #2ed573;
+            color: white;
+        }
+        .btn-clear {
+            background: #576574;
+            color: white;
+        }
+        .panels {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        @media (max-width: 900px) {
+            .panels {
+                grid-template-columns: 1fr;
+            }
+        }
+        .panel {
+            background: #16213e;
+            border-radius: 10px;
+            padding: 20px;
+            min-height: 500px;
+        }
+        .panel h2 {
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #333;
+        }
+        .panel.vulnerable h2 {
+            color: #ff4757;
+            border-color: #ff4757;
+        }
+        .panel.secure h2 {
+            color: #2ed573;
+            border-color: #2ed573;
+        }
+        .sequence {
+            position: relative;
+            padding: 20px 0;
+        }
+        .actors {
+            display: flex;
+            justify-content: space-around;
+            margin-bottom: 20px;
+        }
+        .actor {
+            text-align: center;
+            padding: 10px 20px;
+            background: #0f3460;
+            border-radius: 6px;
+            min-width: 100px;
+        }
+        .lifeline {
+            position: absolute;
+            width: 2px;
+            background: #333;
+            top: 80px;
+            bottom: 0;
+        }
+        .lifeline.client {
+            left: 25%;
+        }
+        .lifeline.server {
+            left: 75%;
+        }
+        .events {
+            position: relative;
+            min-height: 300px;
+        }
+        .event {
+            display: flex;
+            align-items: center;
+            margin: 10px 0;
+            padding: 8px;
+            border-radius: 4px;
+            font-size: 13px;
+            animation: fadeIn 0.3s ease-in;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .event.request {
+            background: linear-gradient(90deg, #0f3460 0%, #1a1a2e 50%, #0f3460 100%);
+        }
+        .event.response {
+            background: linear-gradient(90deg, #0f3460 0%, #1a1a2e 50%, #0f3460 100%);
+        }
+        .event.timeout {
+            background: #ff475733;
+            border: 1px solid #ff4757;
+        }
+        .event.orphan {
+            background: #ffa50233;
+            border: 1px solid #ffa502;
+            padding: 15px 8px 8px 8px;
+            margin-top: 20px;
+        }
+        .event.orphan-discarded {
+            background: #2ed57333;
+            border: 1px solid #2ed573;
+            padding: 15px 8px 8px 8px;
+            margin-top: 20px;
+        }
+        .event-time {
+            width: 60px;
+            color: #888;
+            font-family: monospace;
+        }
+        .event-arrow {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+        .arrow-line {
+            height: 2px;
+            flex: 1;
+            position: relative;
+        }
+        .arrow-line.right {
+            background: linear-gradient(90deg, #00d4ff, #00d4ff);
+        }
+        .arrow-line.left {
+            background: linear-gradient(90deg, #2ed573, #2ed573);
+        }
+        .arrow-line.right::after {
+            content: '';
+            position: absolute;
+            right: 0;
+            top: -4px;
+            border: 5px solid transparent;
+            border-left: 8px solid #00d4ff;
+        }
+        .arrow-line.left::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: -4px;
+            border: 5px solid transparent;
+            border-right: 8px solid #2ed573;
+        }
+        .arrow-label {
+            position: absolute;
+            top: -20px;
+            left: 50%;
+            transform: translateX(-50%);
+            white-space: nowrap;
+            font-size: 11px;
+            color: #aaa;
+        }
+        .event-id {
+            width: 120px;
+            text-align: right;
+            font-family: monospace;
+            color: #00d4ff;
+        }
+        .stats {
+            margin-top: 20px;
+            padding: 15px;
+            background: #0f3460;
+            border-radius: 6px;
+        }
+        .stats h3 {
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            border-bottom: 1px solid #333;
+        }
+        .stat-row:last-child {
+            border-bottom: none;
+        }
+        .stat-value {
+            font-family: monospace;
+            font-weight: bold;
+        }
+        .stat-value.danger {
+            color: #ff4757;
+        }
+        .stat-value.safe {
+            color: #2ed573;
+        }
+        .legend {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+        }
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+        }
+        .legend-color.request { background: #00d4ff; }
+        .legend-color.response { background: #2ed573; }
+        .legend-color.timeout { background: #ff4757; }
+        .legend-color.orphan { background: #ffa502; }
+        .comparison {
+            margin-top: 30px;
+            padding: 20px;
+            background: #16213e;
+            border-radius: 10px;
+        }
+        .comparison h2 {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .comparison-table th,
+        .comparison-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #333;
+        }
+        .comparison-table th {
+            background: #0f3460;
+        }
+        .comparison-table .vulnerable-col {
+            color: #ff4757;
+        }
+        .comparison-table .secure-col {
+            color: #2ed573;
+        }
+        .running {
+            text-align: center;
+            padding: 40px;
+            color: #00d4ff;
+        }
+        .running::after {
+            content: '';
+            animation: dots 1.5s infinite;
+        }
+        @keyframes dots {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60%, 100% { content: '...'; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Async RPC Failure Simulator</h1>
+        <p class="subtitle">非同期RPCの失敗モードを視覚的に理解する</p>
+
+        <div class="controls">
+            <button class="btn-vulnerable" onclick="runScenario('vulnerable')">
+                脆弱な実装を実行
+            </button>
+            <button class="btn-secure" onclick="runScenario('secure')">
+                堅牢な実装を実行
+            </button>
+            <button class="btn-clear" onclick="clearAll()">
+                クリア
+            </button>
+        </div>
+
+        <div class="legend">
+            <div class="legend-item">
+                <div class="legend-color request"></div>
+                <span>リクエスト</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color response"></div>
+                <span>レスポンス</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color timeout"></div>
+                <span>タイムアウト</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color orphan"></div>
+                <span>Orphan Response</span>
+            </div>
+        </div>
+
+        <div class="panels">
+            <div class="panel vulnerable">
+                <h2>脆弱な実装</h2>
+                <div class="sequence">
+                    <div class="actors">
+                        <div class="actor">Client</div>
+                        <div class="actor">Server</div>
+                    </div>
+                    <div class="events" id="vulnerable-events">
+                        <p style="color: #666; text-align: center; padding: 40px;">
+                            「脆弱な実装を実行」をクリックしてください
+                        </p>
+                    </div>
+                </div>
+                <div class="stats" id="vulnerable-stats" style="display: none;">
+                    <h3>統計情報</h3>
+                    <div class="stat-row">
+                        <span>リクエスト送信数</span>
+                        <span class="stat-value" id="v-requests">0</span>
+                    </div>
+                    <div class="stat-row">
+                        <span>レスポンス受信数</span>
+                        <span class="stat-value" id="v-responses">0</span>
+                    </div>
+                    <div class="stat-row">
+                        <span>タイムアウト数</span>
+                        <span class="stat-value" id="v-timeouts">0</span>
+                    </div>
+                    <div class="stat-row">
+                        <span>Orphan保存数</span>
+                        <span class="stat-value danger" id="v-orphans">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel secure">
+                <h2>堅牢な実装</h2>
+                <div class="sequence">
+                    <div class="actors">
+                        <div class="actor">Client</div>
+                        <div class="actor">Server</div>
+                    </div>
+                    <div class="events" id="secure-events">
+                        <p style="color: #666; text-align: center; padding: 40px;">
+                            「堅牢な実装を実行」をクリックしてください
+                        </p>
+                    </div>
+                </div>
+                <div class="stats" id="secure-stats" style="display: none;">
+                    <h3>統計情報</h3>
+                    <div class="stat-row">
+                        <span>リクエスト送信数</span>
+                        <span class="stat-value" id="s-requests">0</span>
+                    </div>
+                    <div class="stat-row">
+                        <span>レスポンス受信数</span>
+                        <span class="stat-value" id="s-responses">0</span>
+                    </div>
+                    <div class="stat-row">
+                        <span>タイムアウト数</span>
+                        <span class="stat-value" id="s-timeouts">0</span>
+                    </div>
+                    <div class="stat-row">
+                        <span>Orphan破棄数</span>
+                        <span class="stat-value safe" id="s-orphans">0</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="comparison">
+            <h2>脆弱 vs 堅牢 比較</h2>
+            <table class="comparison-table">
+                <thead>
+                    <tr>
+                        <th>項目</th>
+                        <th class="vulnerable-col">脆弱な実装</th>
+                        <th class="secure-col">堅牢な実装</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>request_id</td>
+                        <td class="vulnerable-col">連番（1, 2, 3...）予測可能</td>
+                        <td class="secure-col">暗号論的乱数（予測不可能）</td>
+                    </tr>
+                    <tr>
+                        <td>Orphan Response</td>
+                        <td class="vulnerable-col">リストに保存（再利用可能）</td>
+                        <td class="secure-col">ログ出力して破棄</td>
+                    </tr>
+                    <tr>
+                        <td>タイムアウト検証</td>
+                        <td class="vulnerable-col">なし</td>
+                        <td class="secure-col">MIN/MAX範囲チェック</td>
+                    </tr>
+                    <tr>
+                        <td>セキュリティリスク</td>
+                        <td class="vulnerable-col">情報漏洩、認証バイパスの可能性</td>
+                        <td class="secure-col">攻撃を構造的に防止</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // シミュレーションデータ
+        const scenarios = {
+            vulnerable: [
+                { time: 0, type: 'request', direction: 'right', label: 'initialize', id: '1' },
+                { time: 100, type: 'response', direction: 'left', label: 'serverInfo', id: '1' },
+                { time: 200, type: 'request', direction: 'right', label: 'ping', id: '2' },
+                { time: 300, type: 'response', direction: 'left', label: '{}', id: '2' },
+                { time: 400, type: 'request', direction: 'right', label: 'add_numbers(1+2)', id: '3' },
+                { time: 450, type: 'request', direction: 'right', label: 'add_numbers(40+2)', id: '4' },
+                { time: 550, type: 'response', direction: 'left', label: '"3"', id: '3' },
+                { time: 600, type: 'response', direction: 'left', label: '"42"', id: '4' },
+                { time: 700, type: 'request', direction: 'right', label: 'sleep_ms(300)', id: '5' },
+                { time: 750, type: 'timeout', label: 'TimeoutError (50ms)', id: '5' },
+                { time: 1050, type: 'orphan', direction: 'left', label: 'Orphan! 保存される', id: '5' },
+            ],
+            secure: [
+                { time: 0, type: 'request', direction: 'right', label: 'initialize', id: 'a3f8c9...' },
+                { time: 100, type: 'response', direction: 'left', label: 'serverInfo', id: 'a3f8c9...' },
+                { time: 200, type: 'request', direction: 'right', label: 'ping', id: '7b2d4f...' },
+                { time: 300, type: 'response', direction: 'left', label: '{}', id: '7b2d4f...' },
+                { time: 400, type: 'request', direction: 'right', label: 'add_numbers(1+2)', id: 'cdb4fb...' },
+                { time: 450, type: 'request', direction: 'right', label: 'add_numbers(40+2)', id: '02d0c6...' },
+                { time: 550, type: 'response', direction: 'left', label: '"3"', id: 'cdb4fb...' },
+                { time: 600, type: 'response', direction: 'left', label: '"42"', id: '02d0c6...' },
+                { time: 700, type: 'request', direction: 'right', label: 'sleep_ms(300)', id: 'b484ad...' },
+                { time: 750, type: 'timeout', label: 'TimeoutError (50ms) + WARN', id: 'b484ad...' },
+                { time: 1050, type: 'orphan-discarded', direction: 'left', label: 'Orphan 破棄!', id: 'b484ad...' },
+            ]
+        };
+
+        const stats = {
+            vulnerable: { requests: 0, responses: 0, timeouts: 0, orphans: 0 },
+            secure: { requests: 0, responses: 0, timeouts: 0, orphans: 0 }
+        };
+
+        let running = false;
+
+        function runScenario(type) {
+            if (running) return;
+            running = true;
+
+            const eventsContainer = document.getElementById(`${type}-events`);
+            const statsContainer = document.getElementById(`${type}-stats`);
+
+            eventsContainer.innerHTML = '<p class="running">実行中</p>';
+            statsContainer.style.display = 'none';
+            stats[type] = { requests: 0, responses: 0, timeouts: 0, orphans: 0 };
+
+            // ボタンを無効化
+            document.querySelectorAll('button').forEach(btn => btn.disabled = true);
+
+            setTimeout(() => {
+                eventsContainer.innerHTML = '';
+                let delay = 0;
+
+                scenarios[type].forEach((event, index) => {
+                    setTimeout(() => {
+                        addEvent(eventsContainer, event, type);
+                        updateStats(type, event);
+
+                        if (index === scenarios[type].length - 1) {
+                            statsContainer.style.display = 'block';
+                            running = false;
+                            document.querySelectorAll('button').forEach(btn => btn.disabled = false);
+                        }
+                    }, delay);
+                    delay += 300;
+                });
+            }, 500);
+        }
+
+        function addEvent(container, event, type) {
+            const div = document.createElement('div');
+            div.className = `event ${event.type}`;
+
+            const timeStr = `${event.time}ms`;
+
+            if (event.type === 'timeout') {
+                div.innerHTML = `
+                    <span class="event-time">${timeStr}</span>
+                    <span style="flex: 1; text-align: center; color: #ff4757;">
+                        ⚠️ ${event.label}
+                    </span>
+                    <span class="event-id">id=${event.id}</span>
+                `;
+            } else if (event.type === 'orphan') {
+                div.innerHTML = `
+                    <span class="event-time">${timeStr}</span>
+                    <div class="event-arrow">
+                        <div class="arrow-line left">
+                            <span class="arrow-label" style="color: #ffa502;">${event.label}</span>
+                        </div>
+                    </div>
+                    <span class="event-id" style="color: #ffa502;">id=${event.id}</span>
+                `;
+            } else if (event.type === 'orphan-discarded') {
+                div.innerHTML = `
+                    <span class="event-time">${timeStr}</span>
+                    <div class="event-arrow">
+                        <div class="arrow-line left" style="background: #2ed573; opacity: 0.5;">
+                            <span class="arrow-label" style="color: #2ed573;">${event.label}</span>
+                        </div>
+                    </div>
+                    <span class="event-id" style="color: #2ed573;">id=${event.id}</span>
+                `;
+            } else {
+                div.innerHTML = `
+                    <span class="event-time">${timeStr}</span>
+                    <div class="event-arrow">
+                        <div class="arrow-line ${event.direction}">
+                            <span class="arrow-label">${event.label}</span>
+                        </div>
+                    </div>
+                    <span class="event-id">id=${event.id}</span>
+                `;
+            }
+
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function updateStats(type, event) {
+            if (event.type === 'request') stats[type].requests++;
+            if (event.type === 'response') stats[type].responses++;
+            if (event.type === 'timeout') stats[type].timeouts++;
+            if (event.type === 'orphan' || event.type === 'orphan-discarded') stats[type].orphans++;
+
+            const prefix = type === 'vulnerable' ? 'v' : 's';
+            document.getElementById(`${prefix}-requests`).textContent = stats[type].requests;
+            document.getElementById(`${prefix}-responses`).textContent = stats[type].responses;
+            document.getElementById(`${prefix}-timeouts`).textContent = stats[type].timeouts;
+            document.getElementById(`${prefix}-orphans`).textContent = stats[type].orphans;
+        }
+
+        function clearAll() {
+            ['vulnerable', 'secure'].forEach(type => {
+                document.getElementById(`${type}-events`).innerHTML = `
+                    <p style="color: #666; text-align: center; padding: 40px;">
+                        「${type === 'vulnerable' ? '脆弱' : '堅牢'}な実装を実行」をクリックしてください
+                    </p>
+                `;
+                document.getElementById(`${type}-stats`).style.display = 'none';
+                stats[type] = { requests: 0, responses: 0, timeouts: 0, orphans: 0 };
+            });
+        }
+    </script>
+</body>
+</html>

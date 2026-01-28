@@ -39,6 +39,12 @@ printf '{"jsonrpc":"2.0","id":1,"method":"ping"}' | ./venv/bin/python mcp/demo_s
 npx -y @modelcontextprotocol/inspector@0.19.0 -- ./venv/bin/python ./mcp/demo_server.py
 ```
 
+### Launch Web UI Visualization
+```bash
+./venv/bin/python web/server.py
+# Opens http://localhost:8080 in browser
+```
+
 ## Architecture
 
 ### Two-Component Design
@@ -62,6 +68,11 @@ npx -y @modelcontextprotocol/inspector@0.19.0 -- ./venv/bin/python ./mcp/demo_se
    - **Secure**: Cryptographic random IDs (`secrets.token_hex`), orphans discarded
    - Timeout range validation with warnings
    - Statistics tracking for monitoring
+
+4. **`web/`** - Web UI for visual learning
+   - `index.html`: Interactive visualization of vulnerable vs secure implementations
+   - `server.py`: Simple HTTP server (standard library only)
+   - Shows request/response flow with timeline animation
 
 ### Key Failure Mode: Orphan Response Pattern
 ```
