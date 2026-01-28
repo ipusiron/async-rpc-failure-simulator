@@ -18,7 +18,7 @@ category_en:
   - Design Failure Visualization
   - Asynchronous Security
 
-difficulty: 3
+difficulty: 4
 
 tags:
   - async
@@ -82,6 +82,98 @@ hub: true
 - MCP/Agent/Tool callingを扱う開発者
 - セキュリティ初学者〜中級者
 - 「攻撃ではないが危険な設計」に関心のある人
+
+---
+
+## 📚 つまずいたときの学習ガイド
+
+本ツールを使ったりREADMEを読んでもピンとこない場合、以下の前提知識を順番に学ぶことをおすすめします。
+
+### 1. 非同期処理の基礎（最重要）
+
+本ツールの核心は「非同期」です。以下の概念を理解しましょう。
+
+| 概念 | 説明 |
+|------|------|
+| 同期 vs 非同期 | 「結果を待ってから次へ進む」vs「待たずに次へ進む」 |
+| Future/Promise | 「まだ届いていない結果を表すオブジェクト」 |
+| タイムアウト | 「一定時間待っても結果が来なければ諦める」 |
+
+**学習リソース:**
+- Python公式: [concurrent.futures](https://docs.python.org/ja/3/library/concurrent.futures.html)
+- キーワード: 「Python 非同期処理 入門」「Python Future 使い方」
+
+### 2. クライアント・サーバーモデル
+
+「リクエストを送って、レスポンスを受け取る」という基本パターンを理解しましょう。
+
+```
+クライアント                    サーバー
+    │                             │
+    ├─── リクエスト（id=1）──────→│
+    │                             │
+    │←────── レスポンス（id=1）───┤
+    │                             │
+```
+
+**ポイント:**
+- リクエストとレスポンスは `id` で対応づける
+- 複数のリクエストを同時に送ると、レスポンスの順番は保証されない
+
+**学習リソース:**
+- キーワード: 「HTTPリクエスト レスポンス 仕組み」「WebSocket 入門」
+
+### 3. マルチスレッドの基礎
+
+本ツールでは「メインスレッド」と「readerスレッド」が同時に動きます。
+
+| スレッド | 役割 |
+|---------|------|
+| メインスレッド | リクエストを送信し、結果を待つ |
+| readerスレッド | サーバーからの応答を常に監視し、受信したら対応するFutureに結果をセット |
+
+**学習リソース:**
+- Python公式: [threading](https://docs.python.org/ja/3/library/threading.html)
+- キーワード: 「Python スレッド 入門」「マルチスレッド 排他制御」
+
+### 4. JSON-RPC 2.0（軽めでOK）
+
+MCPが採用しているプロトコルです。以下だけ押さえれば十分です。
+
+| 項目 | 説明 |
+|------|------|
+| `id` フィールド | リクエストとレスポンスを紐づける識別子 |
+| リクエスト | `id` あり → 応答が必要 |
+| 通知（notification） | `id` なし → 応答不要 |
+
+**学習リソース:**
+- [JSON-RPC 2.0 仕様](https://www.jsonrpc.org/specification)（英語だが短い）
+
+### 5. MCP（Model Context Protocol）
+
+本ツールが題材としているプロトコルです。AIエージェントとツール間の通信規格として注目されています。
+
+| 概念 | 説明 |
+|------|------|
+| stdio transport | 標準入出力（stdin/stdout）を使った通信方式 |
+| `initialize` | クライアントとサーバーの接続開始ハンドシェイク |
+| `tools/call` | サーバーが提供するツールを呼び出すメソッド |
+| MCP Inspector | MCPサーバーをテストするためのGUIツール |
+
+**学習リソース:**
+- [MCP公式ドキュメント](https://modelcontextprotocol.io/)
+- [MCP Transport仕様（JSON-RPCとの関係）](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+- キーワード: 「MCP Model Context Protocol 入門」「Claude MCP」
+
+### 学習の順番
+
+```
+1. 非同期処理 ─→ 2. クライアント・サーバー ─→ 3. マルチスレッド ─→ 4. JSON-RPC ─→ 5. MCP
+     ↓                    ↓                        ↓                    ↓              ↓
+  Future/timeout      id で突き合わせ         readerスレッド        プロトコル基盤    本ツールの題材
+```
+
+これらを理解した上で本ツールに戻ると、「なぜorphan responseが発生するのか」「なぜIDの予測可能性が危険なのか」がクリアになるはずです。
 
 ---
 
@@ -1310,13 +1402,6 @@ async-rpc-failure-simulator/
     ├── inspector_demo_server.png
     └── inspector_demo_server2.png
 ```
-
----
-
-## 🔗 関連サイト
-
-- [MCP uses JSON-RPC to encode messages.](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
-
 
 ---
 
