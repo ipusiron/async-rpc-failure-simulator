@@ -184,10 +184,13 @@ def handle_request(msg: dict):
 
     # --- tools/list ---
     if method == "tools/list":
+        # Inspector 互換のため、配列そのものではなくオブジェクト内の tools 配列で返す
         return {
             "jsonrpc": "2.0",
             "id": req_id,
-            "result": list_tools(),
+            "result": {
+                "tools": list_tools()
+            },
         }
 
     # --- tools/call ---
