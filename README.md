@@ -18,7 +18,7 @@ category_en:
   - Design Failure Visualization
   - Asynchronous Security
 
-difficulty: 4
+difficulty: 3
 
 tags:
   - async
