@@ -39,3 +39,14 @@ secrets/
 # User data (if any)
 uploads/
 user_data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# venv
+venv/
+.venv/
+

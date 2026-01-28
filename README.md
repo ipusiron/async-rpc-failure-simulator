@@ -1190,6 +1190,91 @@ A: `web/index.html` 内の `scenarios` オブジェクトを編集すること�
 
 ---
 
+## 🎯 CTF形式の攻撃体験チャレンジ
+
+本ツールには、学んだ知識を実践するためのCTF（Capture The Flag）形式のチャレンジが含まれています。
+
+### Challenge 1: Orphan Response Hijacking
+
+**難易度**: ★★☆☆☆（初級〜中級）
+
+**シナリオ**:
+あなたはセキュリティ研究者です。とある企業の内部システムで使われているMCPサーバーに脆弱性があるという報告を受けました。このサーバーには複数のユーザーがアクセスしており、各ユーザーの秘密情報を管理しています。あなたは「guest」ユーザーとしてアクセスできますが、「admin」ユーザーの秘密情報（FLAG）を取得することが目標です。
+
+**目標**:
+```
+admin ユーザーの秘密情報（FLAG{...}）を取得せよ
+```
+
+**難易度選択**:
+| モード | 説明 |
+|--------|------|
+| 🟢 Easy | ソースコード参照OK、穴埋めテンプレート使用 |
+| 🟡 Normal | ソースコードは見ない、挙動から攻撃を構築（実践的） |
+| 🔴 Hard | ヒントなし、完全自力で偵察→分析→攻撃 |
+
+**学習できること**:
+- orphan responseとは何か
+- なぜorphanを保存すると危険か
+- タイミング攻撃の基本
+- 対策方法（orphan破棄、暗号論的乱数ID）
+- ブラックボックステストでの脆弱性発見手法（Normal/Hardモード）
+
+**ファイル構成**:
+```
+challenges/challenge1_orphan_hijack/
+├── README.md              # 詳細な説明書
+├── vulnerable_server.py   # 攻撃対象の脆弱なサーバー
+├── exploit_template.py    # 穴埋め式の攻撃スクリプト（Easyモード用）
+├── hint1.txt              # ヒント1：攻撃の方向性
+├── hint2.txt              # ヒント2：具体的なテクニック
+├── hint_blackbox.txt      # ブラックボックス攻撃の手法（Normal/Hardモード用）
+└── solution.py            # 模範解答（最後の手段）
+```
+
+**実行方法**:
+
+```bash
+# ターミナル1: 脆弱なサーバーを起動
+cd challenges/challenge1_orphan_hijack
+../../venv/bin/python vulnerable_server.py
+
+# ターミナル2: 攻撃スクリプトを編集・実行
+cd challenges/challenge1_orphan_hijack
+# exploit_template.py を編集して攻撃を完成させる
+../../venv/bin/python exploit_template.py
+```
+
+**攻撃成功時の出力例**:
+```
+============================================================
+Challenge 1: Orphan Response Hijacking - 模範解答
+============================================================
+
+[*] ステップ1: guest としてログイン
+[+] ログイン成功
+
+[*] ステップ2: admin の活動をトリガー
+[Admin] ログイン完了
+[Admin] 秘密情報を取得中（2秒の遅延あり）...
+[Admin] 待ちきれない！接続切断
+
+[*] ステップ3: orphan が発生するのを待機中...
+
+[*] ステップ4: orphan response を取得
+[*] 取得した orphan 数: 1
+
+[*] ステップ5: FLAG を抽出
+
+============================================================
+[+] FLAG 発見: FLAG{0rph4n_r3sp0ns3_h1j4ck3d_succ3ssfully}
+============================================================
+
+おめでとうございます！攻撃成功です。
+```
+
+---
+
 ## 📁 ディレクトリ構造
 
 ```
@@ -1209,6 +1294,16 @@ async-rpc-failure-simulator/
 ├── web/                           # Web UI（視覚化ツール）
 │   ├── index.html                 #   メインページ（HTML/CSS/JS）
 │   └── server.py                  #   Webサーバー（標準ライブラリのみ）
+│
+├── challenges/                    # CTF形式の攻撃体験チャレンジ
+│   └── challenge1_orphan_hijack/  #   Challenge 1: Orphan Response Hijacking
+│       ├── README.md              #     詳細な説明書
+│       ├── vulnerable_server.py   #     攻撃対象の脆弱なサーバー
+│       ├── exploit_template.py    #     穴埋め式の攻撃スクリプト（Easyモード）
+│       ├── hint1.txt              #     ヒント1：攻撃の方向性
+│       ├── hint2.txt              #     ヒント2：具体的なテクニック
+│       ├── hint_blackbox.txt      #     ブラックボックス攻撃の手法
+│       └── solution.py            #     模範解答
 │
 └── assets/                        # ドキュメント用画像
     ├── screenshot.png             #   テスト実行結果
