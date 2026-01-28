@@ -186,11 +186,11 @@ ipusiron@MHL:~/async-rpc-failure-simulator$ npx -y @modelcontextprotocol/inspect
 
 InspectorのResources/Toolsタブを確認します。
 
-> ![InspectorのResourcesタブ](inspector_demo_server.png)
+> ![InspectorのResourcesタブ](/assets/inspector_demo_server.png)
 >
 > *InspectorのResourcesタブ*
 
-> ![InspectorのToolsタブ](inspector_demo_server2.png)
+> ![InspectorのToolsタブ](/assets/inspector_demo_server2.png)
 >
 > *InspectorのToolsタブ*
 
