@@ -19,9 +19,14 @@ python3 -m venv venv
 ./venv/bin/python ./mcp/demo_server.py
 ```
 
-### Run Failure Scenario Tests
+### Run Failure Scenario Tests (Vulnerable Implementation)
 ```bash
 ./venv/bin/python ./mcp/scenarios_test.py
+```
+
+### Run Secure Implementation Tests
+```bash
+./venv/bin/python ./mcp/scenarios_test_secure.py
 ```
 
 ### Manual Protocol Test (ping)
@@ -45,11 +50,18 @@ npx -y @modelcontextprotocol/inspector@0.19.0 -- ./venv/bin/python ./mcp/demo_se
    - Tools: `add_numbers` (arithmetic), `sleep_ms` (deliberate delay for timeout testing)
    - Tool errors use `result.isError` flag, NOT JSON-RPC error protocol
 
-2. **`mcp/scenarios_test.py`** - Test client reproducing failure modes
+2. **`mcp/scenarios_test.py`** - Test client reproducing failure modes (VULNERABLE)
    - Spawns demo_server.py as subprocess
    - `StdioMcpClient` class with multi-threaded design (main + reader thread)
    - `_pending` dict maps request IDs to Futures
    - `orphan_responses` collects responses that arrive after timeout cleanup
+   - **Vulnerable**: Sequential IDs, orphans stored for reuse
+
+3. **`mcp/secure_client.py`** + **`mcp/scenarios_test_secure.py`** - Secure implementation
+   - `SecureStdioMcpClient` with hardened design
+   - **Secure**: Cryptographic random IDs (`secrets.token_hex`), orphans discarded
+   - Timeout range validation with warnings
+   - Statistics tracking for monitoring
 
 ### Key Failure Mode: Orphan Response Pattern
 ```

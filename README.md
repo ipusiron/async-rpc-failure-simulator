@@ -427,6 +427,351 @@ if fut is None:
 
 ---
 
+## 🛡️ "scenarios_test_secure.py"プログラムによる実験
+
+### 使用ファイルの役割
+
+| ファイル | 役割 |
+|---------|------|
+| `secure_client.py` | 堅牢化されたMCPクライアント実装（ライブラリ） |
+| `scenarios_test_secure.py` | 堅牢な実装を使ったテストシナリオ（実行スクリプト） |
+
+### secure_client.py のコア処理
+
+```python
+class SecureStdioMcpClient:
+    """堅牢化されたMCPクライアント"""
+
+    def _issue_id(self) -> str:
+        """【堅牢化1】暗号論的乱数でIDを生成"""
+        return secrets.token_hex(16)  # 128ビットの予測不可能なID
+
+    def _reader_loop(self):
+        """サーバからのレスポンスを読み取るスレッド"""
+        for line in self.process.stdout:
+            data = json.loads(line)
+            resp_id = data.get("id")
+
+            with self._lock:
+                fut = self._pending.get(resp_id)
+
+            if fut is None:
+                # 【堅牢化2】orphanは保存せず破棄
+                self.stats["orphans_discarded"] += 1
+                log_security("WARN", f"Orphan response を破棄: id={resp_id}")
+                continue  # ← リストに追加しない
+
+            fut.set_result(data)
+
+    def request(self, method: str, params: dict, timeout: float = None) -> dict:
+        """同期リクエスト（タイムアウト検証付き）"""
+        # 【堅牢化3】タイムアウト範囲チェック
+        if timeout < MIN_TIMEOUT:
+            log_security("WARN", f"タイムアウトが短すぎます")
+        elif timeout > MAX_TIMEOUT:
+            log_security("WARN", f"タイムアウトが長すぎます")
+
+        request_id, fut = self.send_request(method, params)
+        try:
+            return fut.result(timeout=timeout)
+        finally:
+            # 必ず台帳から削除（TOCTOU対策）
+            with self._lock:
+                self._pending.pop(request_id, None)
+```
+
+**3つの堅牢化ポイント**:
+1. **`_issue_id()`**: `secrets.token_hex(16)`で予測不可能なIDを生成
+2. **`_reader_loop()`**: orphan responseをリストに保存せず、ログ出力後に破棄
+3. **`request()`**: タイムアウト値の範囲チェックと、`finally`での確実な台帳削除
+
+### scenarios_test_secure.py のコア処理
+
+```python
+def scenario_timeout_orphan_secure(client: SecureStdioMcpClient):
+    """SCENARIO 4: タイムアウト → orphan破棄の確認"""
+
+    orphans_before = client.stats["orphans_discarded"]  # 破棄数を記録
+
+    try:
+        # 短いタイムアウト（0.05秒）で300ms待つツールを呼び出し
+        client.request("tools/call", {
+            "name": "sleep_ms",
+            "arguments": {"ms": 300}
+        }, timeout=0.05)
+    except FutureTimeoutError:
+        print("[PASS] TimeoutError を観測")
+
+    time.sleep(0.4)  # orphanが到着するのを待つ
+
+    orphans_after = client.stats["orphans_discarded"]
+
+    if orphans_after > orphans_before:
+        # orphanは「破棄数」としてカウントされ、リストには保存されない
+        print(f"[PASS] orphan response を破棄（カウント: {orphans_before} → {orphans_after}）")
+```
+
+**脆弱な実装との違い**:
+- 脆弱版: `client.orphan_responses`リストに保存 → 再利用可能で危険
+- 堅牢版: `client.stats["orphans_discarded"]`でカウントのみ → 再利用不可
+
+### 実行方法
+
+MCPサーバーである"demo_server.py"を起動した状態で、"scenarios_test_secure.py"ファイルを以下のコマンドで実行します。
+ただし、"secure_client.py"ファイルも配置しておかなければなりません。
+
+```
+ipusiron@MHL:~/async-rpc-failure-simulator$ ./venv/bin/python mcp/scenarios_test_secure.py
+========================================================================
+堅牢な実装（SecureStdioMcpClient）でのテスト実行
+========================================================================
+
+========================================================================
+SCENARIO 1: Handshake（initialize → initialized通知 → ping）
+========================================================================
+[PASS] initialize 応答OK: {'name': 'async-rpc-failure-simulator', 'version': '0.1.0'}
+[INFO] notifications/initialized を送信
+[PASS] ping 応答OK
+
+========================================================================
+SCENARIO 2: 非同期demux（2リクエストを投げて逆順で回収）
+========================================================================
+[INFO] dispatched id1=cdb4fb09... id2=02d0c6e5...
+[INFO] ↑ IDが暗号論的乱数（連番ではない）ことを確認
+[PASS] demux 成功: results = 3 42
+
+========================================================================
+SCENARIO 3: ツールレベルエラー（unknown tool → result.isError）
+========================================================================
+[PASS] ツールエラーを検出: Error: Unknown tool no_such_tool
+
+========================================================================
+SCENARIO 4: タイムアウト → orphan破棄の確認（堅牢版）
+========================================================================
+[INFO] 脆弱な実装との違い:
+       - 脆弱: orphan_responses リストに保存（再利用可能）
+       - 堅牢: ログ出力して破棄（再利用不可）
+
+[WARN] [SECURITY] タイムアウトが短すぎます: 0.05s < 0.1s
+[PASS] TimeoutError を観測（timeout=0.05s, sleep=300ms）
+[WARN] [SECURITY] Orphan response を破棄: id=b484ad0e0b5711d26bdcaed2676e8832
+[PASS] orphan response を破棄（カウント: 0 → 1）
+[INFO] 堅牢な実装では orphan はリストに保存されず、再利用できない
+
+========================================================================
+SCENARIO 5: 脆弱な実装との比較サマリー
+========================================================================
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ 比較項目            │ 脆弱な実装           │ 堅牢な実装            │
+├─────────────────────────────────────────────────────────────────────┤
+│ request_id生成      │ self._next_id += 1   │ secrets.token_hex()   │
+│                     │ → 1, 2, 3...（予測可）│ → ランダム（予測不可）│
+├─────────────────────────────────────────────────────────────────────┤
+│ orphan response     │ orphan_responses     │ stats["orphans_       │
+│                     │   .append(data)      │   discarded"] += 1    │
+│                     │ → 再利用可能         │ → 破棄（再利用不可）  │
+├─────────────────────────────────────────────────────────────────────┤
+│ タイムアウト検証    │ なし                 │ MIN/MAX範囲チェック   │
+│                     │                      │ → 範囲外は警告        │
+├─────────────────────────────────────────────────────────────────────┤
+│ セキュリティログ    │ なし                 │ log_security() で     │
+│                     │                      │ stderr に出力         │
+└─────────────────────────────────────────────────────────────────────┘
+
+【防止できる攻撃】
+1. ID予測攻撃: 連番だと攻撃者が次のIDを予測し、偽レスポンスを注入可能
+   → 暗号論的乱数で予測不可能に
+
+2. Orphan再利用攻撃: タイムアウト後のレスポンスを別リクエストに紐づけ
+   → 破棄することで再利用を防止
+
+3. タイムアウト操作DoS: 極端に長いタイムアウトでリソース占有
+   → 範囲チェックで抑制
+
+
+========================================================================
+CLEANUP & STATISTICS
+========================================================================
+[INFO] サーバ停止
+
+【統計情報】
+  - リクエスト送信数:    6
+  - レスポンス受信数:    5
+  - タイムアウト発生数:  1
+  - orphan破棄数:        1
+
+[INFO] orphan response は保存されず、安全に破棄されました
+```
+
+### 堅牢な実装が防止するCVE・攻撃シナリオ
+
+本セクションで紹介したCVE事例に対し、`secure_client.py`の実装がどのように防御として機能するかを詳細に解説します。
+
+---
+
+#### CVE-2023-44487（HTTP/2 Rapid Reset）への対策
+
+**脆弱性の本質**: クライアントがリクエスト送信後すぐにキャンセルしても、サーバ側で非同期処理が継続しリソースを消費し続ける。
+
+**堅牢な実装での対策**:
+
+```python
+# secure_client.py でのタイムアウト範囲チェック
+if timeout < MIN_TIMEOUT:
+    log_security("WARN", f"タイムアウトが短すぎます: {timeout}s < {MIN_TIMEOUT}s")
+elif timeout > MAX_TIMEOUT:
+    log_security("WARN", f"タイムアウトが長すぎます: {timeout}s > {MAX_TIMEOUT}s")
+```
+
+| 対策ポイント | 効果 |
+|-------------|------|
+| タイムアウト下限（0.1秒） | 極端に短いタイムアウトによる大量orphan生成を抑制 |
+| タイムアウト上限（30秒） | 長時間リソース占有によるDoSを抑制 |
+| 統計情報の記録 | `stats["timeouts"]`で異常なタイムアウト頻度を検知可能 |
+
+**実験結果との対応**:
+```
+[WARN] [SECURITY] タイムアウトが短すぎます: 0.05s < 0.1s
+```
+→ 0.05秒という極端に短いタイムアウトに対して警告を出力。本番環境ではこの警告をアラートに接続することで、Rapid Reset的な攻撃パターンを早期検知できます。
+
+---
+
+#### Apache mod_proxy レスポンス混同（CVE-2020-11984等）への対策
+
+**脆弱性の本質**: エラー処理時にバックエンド接続を適切にクローズせず、次のリクエストに前のレスポンスが紛れ込む。
+
+**堅牢な実装での対策**:
+
+```python
+# secure_client.py でのorphan破棄
+if fut is None:
+    self.stats["orphans_discarded"] += 1
+    log_security("WARN", f"Orphan response を破棄: id={resp_id}")
+    continue  # ← 保存しない（再利用不可）
+```
+
+| 対策ポイント | 効果 |
+|-------------|------|
+| orphanを即座に破棄 | 「前のレスポンスが次のリクエストに紛れ込む」状況を根本的に防止 |
+| 破棄時のログ出力 | 異常な頻度でorphanが発生していないか監視可能 |
+| 統計カウンター | `stats["orphans_discarded"]`でorphan発生率を定量化 |
+
+**実験結果との対応**:
+```
+[WARN] [SECURITY] Orphan response を破棄: id=b484ad0e0b5711d26bdcaed2676e8832
+[PASS] orphan response を破棄（カウント: 0 → 1）
+```
+→ orphanが発生した事実を記録しつつ、再利用可能なリストには保存しない。Apache mod_proxyで問題となった「レスポンスの紛れ込み」が構造的に発生しません。
+
+---
+
+#### CryptoNote Wallet JSON-RPC 脆弱性への対策
+
+**脆弱性の本質**: 予測可能なrequest_idにより、攻撃者が偽のレスポンスを注入可能。
+
+**堅牢な実装での対策**:
+
+```python
+# secure_client.py での暗号論的乱数ID生成
+def _issue_id(self) -> str:
+    return secrets.token_hex(16)  # 128ビットの暗号論的乱数
+```
+
+| 対策ポイント | 効果 |
+|-------------|------|
+| `secrets.token_hex(16)` | 128ビット（16バイト）の暗号論的乱数で予測不可能 |
+| 文字列型ID | 整数オーバーフローの心配がない |
+| 衝突確率 2^-128 | 実質的にIDの重複・衝突は発生しない |
+
+**実験結果との対応**:
+```
+[INFO] dispatched id1=cdb4fb09... id2=02d0c6e5...
+[INFO] ↑ IDが暗号論的乱数（連番ではない）ことを確認
+```
+→ 連番（1, 2, 3...）ではなくランダムな16進数文字列。攻撃者が「次のIDは7だろう」と推測して偽レスポンスを注入する攻撃が不可能になります。
+
+**脆弱な実装との比較**:
+```python
+# 脆弱な実装（scenarios_test.py）
+[INFO] dispatched id1=3, id2=4  # ← 連番、次は5と予測可能
+
+# 堅牢な実装（scenarios_test_secure.py）
+[INFO] dispatched id1=cdb4fb09... id2=02d0c6e5...  # ← 予測不可能
+```
+
+---
+
+#### Juniper Junos RPC Race Condition（CVE-2016-1267）への対策
+
+**脆弱性の本質**: 権限チェックと実際の操作の間にタイミングギャップがあり、その間に状態を変更可能（TOCTOU攻撃）。
+
+**堅牢な実装での対策**:
+
+```python
+# secure_client.py でのpending台帳管理
+def request(self, method: str, params: dict, timeout: float = None) -> dict:
+    ...
+    try:
+        return fut.result(timeout=timeout)
+    except FutureTimeoutError:
+        self.stats["timeouts"] += 1
+        raise
+    finally:
+        with self._lock:
+            self._pending.pop(request_id, None)  # ← 必ず台帳から削除
+```
+
+| 対策ポイント | 効果 |
+|-------------|------|
+| `finally`ブロックでの確実な削除 | 例外発生時も台帳から確実に削除 |
+| ロック（`self._lock`）の使用 | 複数スレッドからの同時アクセスでも整合性を維持 |
+| タイムアウト時の即座の削除 | 「宙に浮いた状態」の時間を最小化 |
+
+**TOCTOU攻撃への耐性**:
+- 脆弱な実装: タイムアウト後もpending台帳にIDが残る可能性 → 攻撃者がそのIDで偽レスポンスを送る余地
+- 堅牢な実装: タイムアウト即座に台帳から削除 → 攻撃のタイミングウィンドウを最小化
+
+---
+
+#### Orange Tsai's Confusion Attacks への対策
+
+**脆弱性の本質**: コンポーネント間でセマンティクス（意味の解釈）が異なり、認証バイパスに悪用される。
+
+**堅牢な実装での対策**:
+
+```python
+# secure_client.py でのセキュリティログ分離
+def log_security(level: str, msg: str):
+    """セキュリティ関連のログ出力"""
+    print(f"[{level}] [SECURITY] {msg}", file=sys.stderr)
+```
+
+| 対策ポイント | 効果 |
+|-------------|------|
+| セキュリティログの分離 | 通常ログとセキュリティイベントを区別 |
+| stderr への出力 | stdout（JSON専用）を汚染しない |
+| 明確なプレフィックス `[SECURITY]` | ログ解析時にセキュリティイベントを抽出しやすい |
+
+**Confusion Attacks防止の観点**:
+- 「どの層で何が起きたか」を明確にログに残すことで、セマンティクスの混同を検知可能
+- 例: orphan発生 → プロトコル層の問題、ツールエラー → アプリ層の問題、と区別できる
+
+---
+
+#### 対策効果のまとめ
+
+| CVE/攻撃シナリオ | 脆弱な実装での問題 | 堅牢な実装での対策 | 実験での確認 |
+|-----------------|-------------------|-------------------|-------------|
+| HTTP/2 Rapid Reset | タイムアウト制限なし | MIN/MAX範囲チェック | `[WARN] タイムアウトが短すぎます` |
+| Apache mod_proxy mixup | orphanをリストに保存 | orphanを即座に破棄 | `orphan破棄数: 1` |
+| CryptoNote ID予測 | 連番ID（1,2,3...） | 暗号論的乱数ID | `id1=cdb4fb09...` |
+| Juniper TOCTOU | 台帳削除が不確実 | finally + lock | 統計情報で追跡可能 |
+| Confusion Attacks | ログ分離なし | `[SECURITY]`プレフィックス | stderrに分離出力 |
+
+---
+
 ## ⚠️ 設計ミスが引き起こす問題
 
 本シミュレーターで再現した失敗モードは、実際のシステムでどのような問題を引き起こすのでしょうか。性能・運用・セキュリティの3つの観点から解説します。
@@ -487,6 +832,90 @@ if fut is None:
 | **タイムアウトは固定値** | 外部入力でタイムアウト値を変更させない |
 | **エラー種別を明確に分離** | プロトコルエラーはリトライ、ツールエラーはユーザーに通知 |
 | **キャンセル機構の実装** | クライアントタイムアウト時にサーバにキャンセル通知を送る |
+
+---
+
+### 脆弱な実装 vs 堅牢な実装（コード比較）
+
+本リポジトリには「脆弱な実装」と「堅牢な実装」の両方が含まれています。
+
+#### 実行方法
+
+```bash
+# 脆弱な実装（失敗モードを観測）
+./venv/bin/python mcp/scenarios_test.py
+
+# 堅牢な実装（正しい設計を確認）
+./venv/bin/python mcp/scenarios_test_secure.py
+```
+
+#### コード差分
+
+| 観点 | 脆弱な実装（`scenarios_test.py`） | 堅牢な実装（`secure_client.py`） |
+|------|----------------------------------|----------------------------------|
+| **request_id生成** | `self._next_id += 1`（連番） | `secrets.token_hex(16)`（暗号論的乱数） |
+| **orphan response** | `self.orphan_responses.append(data)`（保存） | `stats["orphans_discarded"] += 1`（破棄） |
+| **タイムアウト** | 引数をそのまま使用 | 範囲チェック（MIN/MAX外は警告） |
+| **統計情報** | なし | `get_stats()`で取得可能 |
+
+#### ID生成の比較
+
+```python
+# 脆弱な実装（scenarios_test.py:87-90）
+def _issue_id(self) -> int:
+    with self._lock:
+        self._next_id += 1
+        return self._next_id  # → 1, 2, 3...（予測可能）
+
+# 堅牢な実装（secure_client.py）
+def _issue_id(self) -> str:
+    return secrets.token_hex(16)  # → "a3f8c9e1..."（予測不可能）
+```
+
+#### orphan処理の比較
+
+```python
+# 脆弱な実装（scenarios_test.py:120-123）
+if fut is None:
+    # 台帳にない -> orphan（タイムアウト後の遅延レスポンス等）
+    self.orphan_responses.append(data)  # ← 保存（再利用可能で危険）
+    continue
+
+# 堅牢な実装（secure_client.py）
+if fut is None:
+    self.stats["orphans_discarded"] += 1
+    log_security("WARN", f"Orphan response を破棄: id={resp_id}")
+    continue  # ← 保存しない（再利用不可）
+```
+
+#### 堅牢な実装の出力例
+
+```
+========================================================================
+SCENARIO 2: 非同期demux（2リクエストを投げて逆順で回収）
+========================================================================
+[INFO] dispatched id1=a3f8c9e1... id2=7b2d4f0a...
+[INFO] ↑ IDが暗号論的乱数（連番ではない）ことを確認
+[PASS] demux 成功: results = 3 42
+
+========================================================================
+SCENARIO 4: タイムアウト → orphan破棄の確認（堅牢版）
+========================================================================
+[WARN] [SECURITY] タイムアウトが短すぎます: 0.05s < 0.1s
+[PASS] TimeoutError を観測（timeout=0.05s, sleep=300ms）
+[WARN] [SECURITY] Orphan response を破棄: id=f9c2e8a1b7d34f6e...
+[PASS] orphan response を破棄（カウント: 0 → 1）
+[INFO] 堅牢な実装では orphan はリストに保存されず、再利用できない
+
+========================================================================
+CLEANUP & STATISTICS
+========================================================================
+【統計情報】
+  - リクエスト送信数:    6
+  - レスポンス受信数:    5
+  - タイムアウト発生数:  1
+  - orphan破棄数:        1
+```
 
 ---
 
@@ -597,18 +1026,20 @@ if fut is None:
 
 ```
 async-rpc-failure-simulator/
-├── README.md                 # 本ドキュメント
-├── CLAUDE.md                 # Claude Code向けガイド
-├── LICENSE                   # MITライセンス
+├── README.md                      # 本ドキュメント
+├── CLAUDE.md                      # Claude Code向けガイド
+├── LICENSE                        # MITライセンス
 ├── .gitignore
-├── .nojekyll                 # GitHub Pages用（Jekyll無効化）
+├── .nojekyll                      # GitHub Pages用（Jekyll無効化）
 │
-├── mcp/                      # MCP実装（本体）
-│   ├── demo_server.py        #   MCPサーバ（stdio transport、Inspector互換）
-│   └── scenarios_test.py     #   失敗モード再現テストクライアント
+├── mcp/                           # MCP実装（本体）
+│   ├── demo_server.py             #   MCPサーバ（stdio transport、Inspector互換）
+│   ├── scenarios_test.py          #   失敗モード再現テスト（脆弱な実装）
+│   ├── secure_client.py           #   堅牢なクライアント実装
+│   └── scenarios_test_secure.py   #   堅牢版テストシナリオ
 │
-└── assets/                   # ドキュメント用画像
-    ├── screenshot.png        #   テスト実行結果
+└── assets/                        # ドキュメント用画像
+    ├── screenshot.png             #   テスト実行結果
     ├── inspector_demo_server.png
     └── inspector_demo_server2.png
 ```
