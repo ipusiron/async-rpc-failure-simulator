@@ -180,7 +180,7 @@ def scenario_compare_implementations():
 def main():
     python_exe = sys.executable
     if not os.path.exists(SERVER_PATH):
-        print(f"[FATAL] サーバスクリプトが見つかりません: {SERVER_PATH}")
+        print(f"[FATAL] サーバースクリプトが見つかりません: {SERVER_PATH}")
         sys.exit(1)
 
     print("=" * 72)
@@ -199,7 +199,7 @@ def main():
     finally:
         header("CLEANUP & STATISTICS")
         stats = client.get_stats()
-        print("[INFO] サーバ停止")
+        print("[INFO] サーバー停止")
         print()
         print("【統計情報】")
         print(f"  - リクエスト送信数:    {stats['requests_sent']}")

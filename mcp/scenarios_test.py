@@ -9,12 +9,12 @@ from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 
 # ============================================================
 # 目的:
-#  - MCP stdio サーバ（mcp/demo_server.py）を起動し、
+#  - MCP stdio サーバー（mcp/demo_server.py）を起動し、
 #    非同期RPCの失敗モード（timeout / orphan response / demux）を
 #    再現可能なシナリオとして実行する。
 #
 # 前提:
-#  - このテストは stdout/stdio の仕様を崩さない（サーバのstdoutはJSONのみ）
+#  - このテストは stdout/stdio の仕様を崩さない（サーバーのstdoutはJSONのみ）
 #  - このテストは「観測（ログ）」も成果なので、標準出力に結果を表示する
 # ============================================================
 
@@ -40,12 +40,12 @@ class StdioMcpClient:
     """
 
     def __init__(self, python_exe: str, server_script: str):
-        # サーバを子プロセスとして起動（stdio transport）
+        # サーバーを子プロセスとして起動（stdio transport）
         self.process = subprocess.Popen(
             [python_exe, server_script],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,  # サーバstderrは捨てる（クライアント出力と混ざらない）
+            stderr=subprocess.DEVNULL,  # サーバーstderrは捨てる（クライアント出力と混ざらない）
             text=True,
             bufsize=1,           # 行バッファ（読みやすさのため）
         )
@@ -66,7 +66,7 @@ class StdioMcpClient:
 
     def close(self):
         """
-        サーバ停止と後始末
+        サーバー停止と後始末
         """
         self._running = False
         try:
@@ -78,7 +78,7 @@ class StdioMcpClient:
 
     def _send(self, msg: dict):
         """
-        1行JSONをサーバstdinへ送信
+        1行JSONをサーバーstdinへ送信
         """
         s = json.dumps(msg)
         self.process.stdin.write(s + "\n")
@@ -91,7 +91,7 @@ class StdioMcpClient:
 
     def _reader_loop(self):
         """
-        サーバstdoutを読み続けて、idで突き合わせる。
+        サーバーstdoutを読み続けて、idで突き合わせる。
         """
         try:
             for line in self.process.stdout:
@@ -99,7 +99,7 @@ class StdioMcpClient:
                 if not line:
                     continue
 
-                # サーバはstdoutにJSONのみ出す前提だが、
+                # サーバーはstdoutにJSONのみ出す前提だが、
                 # 万一混ざったときに観測しやすいように扱う
                 try:
                     data = json.loads(line)
@@ -239,7 +239,7 @@ def scenario_tool_error(client: StdioMcpClient):
         "arguments": {"a": 1, "b": 1}
     }, timeout=5)
 
-    # このデモサーバは JSON-RPC error フィールドではなく
+    # このデモサーバーは JSON-RPC error フィールドではなく
     # result.isError でツールエラーを表現する仕様
     result = resp.get("result")
     if isinstance(result, dict) and result.get("isError") is True:
@@ -266,7 +266,7 @@ def scenario_timeout_orphan(client: StdioMcpClient):
     except FutureTimeoutError:
         print(f"[PASS] TimeoutError を観測（timeout={timeout_sec}s, sleep={ms}ms）")
 
-    # 重要：サーバはこの後、遅れてレスポンスを返してくる
+    # 重要：サーバーはこの後、遅れてレスポンスを返してくる
     # 台帳は掃除済みなので、そのレスポンスは orphan として観測されるはず
     # 少し待って reader が受信する猶予を与える
     time.sleep(ms / 1000.0 + 0.1)
@@ -284,7 +284,7 @@ def main():
     # sys.executable を使えば、その python で demo_server.py が起動される。
     python_exe = sys.executable
     if not os.path.exists(SERVER_PATH):
-        print(f"[FATAL] サーバスクリプトが見つかりません: {SERVER_PATH}")
+        print(f"[FATAL] サーバースクリプトが見つかりません: {SERVER_PATH}")
         sys.exit(1)
 
     client = StdioMcpClient(python_exe=python_exe, server_script=SERVER_PATH)
@@ -299,7 +299,7 @@ def main():
     finally:
         header("CLEANUP")
         client.close()
-        print("[INFO] サーバ停止")
+        print("[INFO] サーバー停止")
 
 
 if __name__ == "__main__":
