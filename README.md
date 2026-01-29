@@ -216,6 +216,56 @@ venvの環境構築ではまった場合は以下の記事を参考にしてく�
 
 ---
 
+## セットアップ（uv）
+
+[uv](https://docs.astral.sh/uv/)は高速なPythonパッケージマネージャー・仮想環境管理ツールです。venvの代わりにuvを使う場合は以下の手順で環境構築できます。
+
+### uvのインストール
+
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+### 仮想環境の作成と実行
+
+```
+ipusiron@MHL:~/async-rpc-failure-simulator$ uv venv
+Using CPython 3.10.12
+Creating virtual environment at: .venv
+Activate with: source .venv/bin/activate
+
+ipusiron@MHL:~/async-rpc-failure-simulator$ uv run python --version
+Python 3.10.12
+```
+
+### テストの実行
+
+uvを使う場合は、`./venv/bin/python`の代わりに`uv run python`を使用します。
+
+```bash
+# MCPサーバーの起動
+uv run python ./mcp/demo_server.py
+
+# 失敗モード再現テスト（脆弱な実装）
+uv run python mcp/scenarios_test.py
+
+# 堅牢な実装テスト
+uv run python mcp/scenarios_test_secure.py
+
+# Web UIの起動
+uv run python web/server.py
+```
+
+> **Note**: 本プロジェクトは標準ライブラリのみを使用しているため、`uv pip install`による依存関係のインストールは不要です。
+
+> **venv vs uv**: 本プロジェクトは「標準ライブラリのみ」という特殊な条件のため、uvの主な強み（高速な依存解決）が活きません。どちらを選んでも実用上の差はほとんどないため、既にuvを使い慣れているなら`uv run python`で統一し、そうでなければ`venv`で十分です。
+
+---
+
 ## MCPサーバーの単体テスト
 
 MCPサーバーは以下の仕様とします。
