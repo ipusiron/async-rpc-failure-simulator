@@ -107,13 +107,13 @@ hub: true
 
 「リクエストを送って、レスポンスを受け取る」という基本パターンを理解しましょう。
 
-```
-クライアント                    サーバー
-    │                             │
-    ├─── リクエスト（id=1）──────→│
-    │                             │
-    │←────── レスポンス（id=1）───┤
-    │                             │
+```mermaid
+sequenceDiagram
+    participant Client as クライアント
+    participant Server as サーバー
+
+    Client->>Server: リクエスト（id=1）
+    Server-->>Client: レスポンス（id=1）
 ```
 
 **ポイント:**
@@ -355,19 +355,26 @@ CLEANUP
 
 #### SCENARIO 1: Handshake（MCPプロトコルの初期化シーケンス）
 
-```
-Client                              Server
-  │                                    │
-  ├─ initialize (id=1) ───────────────→│  ← リクエスト（idあり、応答必須）
-  │                                    │
-  │←─────────────── serverInfo 応答 ───┤  ← 応答（同じid=1で返る）
-  │                                    │
-  ├─ notifications/initialized ───────→│  ← 通知（idなし、応答不要）
-  │                                    │
-  ├─ ping (id=2) ─────────────────────→│  ← リクエスト
-  │                                    │
-  │←─────────────────────── {} 応答 ───┤  ← 応答（id=2）
-  │                                    │
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as クライアント
+    participant Server as サーバー
+
+    Client->>Server: initialize (id=1)
+    Note right of Client: リクエスト（idあり、応答必須）
+
+    Server-->>Client: serverInfo 応答 (id=1)
+    Note left of Server: 応答（同じid=1で返る）
+
+    Client->>Server: notifications/initialized
+    Note right of Client: 通知（idなし、応答不要）
+
+    Client->>Server: ping (id=2)
+    Note right of Client: リクエスト
+
+    Server-->>Client: {} 応答 (id=2)
+    Note left of Server: 応答（id=2）
 ```
 
 **何が起きているか:**
@@ -409,23 +416,6 @@ sequenceDiagram
 **脆弱な実装の実例（CVE-2020-11984等）:**
 Apache mod_proxy では接続を使い回す際にレスポンスが混入し、別のユーザーに他人のレスポンスが表示される事故が発生しました。
 
-以下はテキスト形式での図解です：
-
-```
-Client                              Server
-  │                                    │
-  ├─ add_numbers(1+2) [id=3] ─────────→│
-  ├─ add_numbers(40+2) [id=4] ────────→│  ← 2つのリクエストを連続送信
-  │                                    │
-  │  （サーバーは順番に処理するが、      │
-  │    ネットワーク遅延で逆転する      │
-  │    可能性がある）                  │
-  │                                    │
-  │←─────────────────── id=3, "3" ─────┤
-  │←─────────────────── id=4, "42" ────┤
-  │                                    │
-```
-
 **何が起きているか:**
 1. クライアントは2つのリクエストを**待たずに**連続送信（fire-and-forget）
 2. サーバーは順番に処理して応答を返す
@@ -448,13 +438,16 @@ resp1 = fut1.result(timeout=5)  # id=3 を後に待つ
 
 #### SCENARIO 3: ツールレベルエラー（result.isError）
 
-```
-Client                              Server
-  │                                    │
-  ├─ tools/call("no_such_tool") ──────→│
-  │                                    │
-  │←── result: {isError: true, ...} ───┤  ← JSON-RPC errorではない！
-  │                                    │
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as クライアント
+    participant Server as サーバー
+
+    Client->>Server: tools/call("no_such_tool")
+
+    Server-->>Client: result: {isError: true, ...}
+    Note left of Server: JSON-RPC errorではない！<br/>アプリ層のエラー
 ```
 
 **何が起きているか:**
@@ -513,37 +506,6 @@ sequenceDiagram
 - `t=50ms`でクライアントはIDを忘れますが、`t=300ms`でサーバーからそのIDの返事が届きます
 - これを「Orphan（孤児）」と呼びます
 - **脆弱な実装:** 届いたOrphanを捨てずにリストへ保存してしまうと、攻撃につながります
-
-以下はテキスト形式での詳細な時系列です：
-
-```
-時間軸 →
-
-Client                              Server
-  │                                    │
-  ├─ sleep_ms(300) [id=6] ────────────→│  t=0ms: リクエスト送信
-  │                                    │
-  │  [pending台帳]                     │
-  │  id=6 → Future(waiting)            │
-  │                                    │
-  │  ... 50ms経過 ...                  │
-  │                                    │
-  ├─ TimeoutError発生! ─────────────── │  t=50ms: クライアント側タイムアウト
-  │                                    │
-  │  [pending台帳からid=6を削除]        │  ← ★ここが重要
-  │  id=6 → (削除済み)                 │
-  │                                    │
-  │                                    │  ... サーバーはまだ sleep 中 ...
-  │                                    │
-  │                                    │  t=300ms: サーバー処理完了
-  │←──────────── id=6, "slept 300 ms" ─┤  ← レスポンスが返ってくる
-  │                                    │
-  │  [pending台帳を検索]                │
-  │  id=6 → 見つからない！             │
-  │                                    │
-  │  → orphan_responses に追加         │  ← ★ orphan response の誕生
-  │                                    │
-```
 
 **何が起きているか（ステップバイステップ）:**
 
@@ -1576,6 +1538,9 @@ async-rpc-failure-simulator/
 │       ├── hint2.txt              #     ヒント2：具体的なテクニック
 │       ├── hint_blackbox.txt      #     ブラックボックス攻撃の手法
 │       └── solution.py            #     模範解答
+│
+├── docs/                          # スライド・資料保管用
+│   └── Async_Failure_Simulator.pdf #   解説スライド
 │
 └── assets/                        # ドキュメント用画像
     ├── screenshot.png             #   テスト実行結果
