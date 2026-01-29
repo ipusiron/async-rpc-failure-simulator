@@ -383,6 +383,34 @@ Client                              Server
 
 #### SCENARIO 2: 非同期demux（多重化と順不同応答）
 
+非同期通信では、リクエスト順とレスポンス順が一致するとは限りません。IDによる突き合わせ（Demux）が正しく行われないと、テレコ（取り違え）が発生します。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as クライアント
+    participant Server as サーバー
+
+    Client->>Server: リクエストA (id=1, 1+1)
+    Note over Server: ネットワーク遅延や<br/>並列処理の影響
+    Client->>Server: リクエストB (id=2, 40+2)
+
+    Server-->>Client: レスポンスB (id=2, 答え=42)
+    Note over Server: 先にBが終わった
+
+    Server-->>Client: レスポンスA (id=1, 答え=2)
+    Note over Server: 後からAが終わった
+
+    Note over Client: 【正しい実装】<br/>id=2 → リクエストBの結果<br/>id=1 → リクエストAの結果<br/>✅ OK
+
+    Note over Client: 【脆弱な実装】<br/>「最初に届いた答え(42)」を<br/>「最初のリクエストA」の答えと誤認<br/>❌ リクエストAの結果が「42」に！
+```
+
+**脆弱な実装の実例（CVE-2020-11984等）:**
+Apache mod_proxy では接続を使い回す際にレスポンスが混入し、別のユーザーに他人のレスポンスが表示される事故が発生しました。
+
+以下はテキスト形式での図解です：
+
 ```
 Client                              Server
   │                                    │
@@ -457,6 +485,37 @@ Client                              Server
 
 これが本シミュレーターの**核心シナリオ**です。
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as クライアント
+    participant Server as サーバー
+
+    Client->>Server: sleep_ms(300) [id=6]
+    Note over Client: Pending台帳に登録<br/>id=6 → Future(waiting)
+
+    Note over Client: ⏱️ 50ms経過...
+
+    Note over Client: ⚡ TimeoutError発生!<br/>Pending台帳からid=6を削除 🗑️
+
+    Note over Server: ...まだsleep中...
+
+    Note over Server: t=300ms: 処理完了
+
+    Server-->>Client: レスポンス (id=6)<br/>"slept 300 ms"
+
+    Note over Client: Pending台帳を検索<br/>→ id=6がない！
+
+    Note over Client: ⚠️ Orphan Response として<br/>リストに保存<br/>（これが脆弱性の温床）
+```
+
+**重要な点:**
+- `t=50ms`でクライアントはIDを忘れますが、`t=300ms`でサーバーからそのIDの返事が届きます
+- これを「Orphan（孤児）」と呼びます
+- **脆弱な実装:** 届いたOrphanを捨てずにリストへ保存してしまうと、攻撃につながります
+
+以下はテキスト形式での詳細な時系列です：
+
 ```
 時間軸 →
 
@@ -520,6 +579,116 @@ if fut is None:
 - 遅延したレスポンスは必ず返ってくる
 
 **重要なのは、この現象を想定した設計になっているかどうか**です。
+
+---
+
+## 🔓 攻撃シナリオの可視化
+
+ここまでで観測した失敗モードが、実際にどのような攻撃に発展するかをMermaid図解で示します。
+
+### 攻撃1: Orphan Response Hijacking（レスポンス取り違え攻撃）
+
+Orphan Responseを適切に破棄せず再利用してしまうことで発生する攻撃シナリオです。攻撃者がタイミングを操作し、別人の情報を取得します。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Attacker as 攻撃者
+    participant Client as クライアント<br/>システム
+    participant Server as サーバー
+
+    Attacker->>Client: 他人の情報を要求<br/>(id=10: User-B情報)
+    Client->>Server: リクエスト (id=10)
+
+    Note over Client: ⚡ タイムアウト発生<br/>(Pendingからid=10を削除)
+
+    Attacker->>Client: 次の要求を送る<br/>(id=11: 自分の情報)
+
+    Note over Server: 処理完了
+    Server-->>Client: 遅れて到着 (id=10)<br/>中身: User-Bの情報
+
+    Note over Client: ⚠️ Orphanリストに保存
+
+    Client-->>Attacker: 保存されたOrphan(id=10)を<br/>id=11の応答として返してしまう
+
+    Note over Attacker: 🎯 User-Bの情報を取得成功！<br/>認証バイパス・情報漏洩
+```
+
+**攻撃の成立条件:**
+- クライアントがorphan responseを破棄せずリストに保存している
+- 攻撃者がタイミングを調整し、別ユーザーのレスポンスが「orphan」になるよう仕向ける
+- 保存されたorphanが次のリクエストの応答として誤って返される
+
+**リスク:** 認証バイパス、個人情報の漏洩、セッションハイジャック
+
+---
+
+### 攻撃2: ID予測による偽レスポンス注入
+
+リクエストIDに連番（1, 2, 3...）を使っていると、攻撃者が次のIDを予測してサーバーになりすますことができます。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Attacker as 攻撃者<br/>(中間者)
+    participant Client as クライアント
+    participant Server as サーバー
+
+    Client->>Server: リクエスト (id=3)
+
+    Note over Attacker: 🔍 盗聴: id=3 を観測<br/>「次は id=4 だな」
+
+    Client->>Server: リクエスト (id=4)
+
+    Attacker->>Client: 偽レスポンス<br/>(id=4, 嘘のデータ)
+
+    Note over Client: ✅ id=4の応答を受信<br/>（偽データを正規と誤認）
+
+    Server-->>Client: 本当のレスポンス (id=4)
+
+    Note over Client: ❌ 既にid=4は処理済み<br/>→ orphanとして無視/保存
+```
+
+**攻撃の成立条件:**
+- `self._next_id += 1` のように単純なインクリメントでIDを生成
+- 攻撃者がネットワーク上でパケットを盗聴可能（中間者攻撃）
+- 攻撃者のレスポンスがサーバーより先にクライアントに到達
+
+**対策（堅牢な実装）:** `secrets.token_hex(16)` などを用いて暗号論的乱数でIDを生成し、予測不可能にする
+
+---
+
+### 攻撃3: ツール層エラーとプロトコル層エラーの混同
+
+エラーの種類を取り違えることで、本来リトライすべきでないエラーをリトライしたり、その逆の対応をしてしまう設計ミスです。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as クライアント
+    participant Server as サーバー
+
+    Client->>Server: 存在しないツール呼び出し<br/>(tools/call: "no_such_tool")
+
+    Server-->>Client: レスポンス (id=5)<br/>Result: { isError: true, ... }
+
+    Note over Server: ← アプリ層のエラー<br/>（JSON-RPCとしては成功）
+
+    Note over Client: 【脆弱な処理】<br/>「通信エラーだ！」と勘違い
+
+    loop 無限リトライ
+        Client->>Server: 同じリクエストを再送
+        Server-->>Client: 同じエラーを返す
+    end
+
+    Note over Client: ⚠️ 何度やっても失敗する<br/>リソース浪費・DoS状態
+```
+
+**区別の重要性:**
+| エラー種別 | 形式 | リトライすべきか |
+|-----------|------|-----------------|
+| プロトコル層（JSON-RPC）| `{"error": {"code": -32601, ...}}` | 状況による（一時的障害なら可） |
+| ツール層（MCP/アプリ） | `{"result": {"isError": true, ...}}` | 基本的に不可（ロジックエラー） |
 
 ---
 
