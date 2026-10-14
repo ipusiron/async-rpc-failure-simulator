@@ -2,6 +2,7 @@
 import sys
 import json
 import time
+import math
 
 # ============================================================
 # stdioユーティリティ
@@ -35,7 +36,7 @@ def tool_add_numbers(args: dict):
     a = args.get("a")
     b = args.get("b")
 
-    if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+    if not finite_number(a) or not finite_number(b):
         return {
             "isError": True,
             "content": [
@@ -43,6 +44,8 @@ def tool_add_numbers(args: dict):
             ],
         }
 
+    if not finite_number(a + b):
+        return {"isError": True, "content": [{"type": "text", "text": "Result out of range"}]}
     return {
         "content": [
             {"type": "text", "text": str(a + b)}
@@ -58,7 +61,7 @@ def tool_sleep_ms(args: dict):
     """
     ms = args.get("ms")
 
-    if not isinstance(ms, (int, float)):
+    if not finite_number(ms) or not 0 <= ms <= 5000:
         return {
             "isError": True,
             "content": [
@@ -109,7 +112,7 @@ def list_tools():
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "ms": {"type": "number"},
+                    "ms": {"type": "number", "minimum": 0, "maximum": 5000},
                 },
                 "required": ["ms"],
             },
@@ -121,12 +124,34 @@ def list_tools():
 # リクエスト処理
 # ============================================================
 
+def finite_number(value):
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def protocol_error(req_id, code, message):
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+
+
 def handle_request(msg: dict):
     """
     1 件の MCP / JSON-RPC メッセージを処理する。
     """
+    if (not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0"
+            or not isinstance(msg.get("method"), str)):
+        return protocol_error(None, -32600, "Invalid request")
+    # All valid notifications are response-free, including unknown methods.
+    if "id" not in msg:
+        return None
+    if msg["id"] is not None and type(msg["id"]) not in (int, str):
+        return protocol_error(None, -32600, "Invalid request ID")
     method = msg.get("method")
     req_id = msg.get("id")
+    params = msg.get("params", {})
+    if not isinstance(params, dict):
+        return protocol_error(req_id, -32602, "Named parameters must be an object")
 
     # --- initialize ---
     if method == "initialize":
@@ -147,10 +172,6 @@ def handle_request(msg: dict):
         }
 
     # --- notifications/initialized ---
-    if method == "notifications/initialized":
-        # 通知なのでレスポンス不要
-        return None
-
     # --- ping ---
     if method == "ping":
         return {
@@ -159,7 +180,7 @@ def handle_request(msg: dict):
             "result": {},
         }
     
-	# --- resources/list ---
+    # --- resources/list ---
     if method == "resources/list":
         # このデモサーバーは resources を提供しない（Inspector互換のため空配列を返す）
         return {
@@ -199,19 +220,12 @@ def handle_request(msg: dict):
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
 
+        if not isinstance(tool_name, str) or not isinstance(arguments, dict):
+            return protocol_error(req_id, -32602, "Invalid tools/call parameters")
+
         tool = TOOLS.get(tool_name)
         if tool is None:
-            # ツールレベルのエラー（JSON-RPC error ではない）
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "isError": True,
-                    "content": [
-                        {"type": "text", "text": f"Error: Unknown tool {tool_name}"}
-                    ],
-                },
-            }
+            return protocol_error(req_id, -32602, "Unknown tool")
 
         result = tool(arguments)
         return {
@@ -221,16 +235,7 @@ def handle_request(msg: dict):
         }
 
     # --- 未知のメソッド ---
-    return {
-        "jsonrpc": "2.0",
-        "id": req_id,
-        "result": {
-            "isError": True,
-            "content": [
-                {"type": "text", "text": f"Error: Unknown method {method}"}
-            ],
-        },
-    }
+    return protocol_error(req_id, -32601, "Method not found")
 
 
 # ============================================================
@@ -249,8 +254,7 @@ def main():
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
-            # JSON 以外は無視（stderr にのみ記録）
-            log(f"JSON 解析失敗: {line}")
+            send_message(protocol_error(None, -32700, "Parse error"))
             continue
 
         response = handle_request(msg)
