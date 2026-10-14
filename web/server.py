@@ -51,7 +51,7 @@ def main():
     handler = partial(QuietHandler, directory=HERE)
 
     try:
-        with socketserver.TCPServer(("", port), handler) as httpd:
+        with socketserver.TCPServer(("127.0.0.1", port), handler) as httpd:
             url = f"http://localhost:{port}"
             print("=" * 60)
             print("Async RPC Failure Simulator - Web UI")
