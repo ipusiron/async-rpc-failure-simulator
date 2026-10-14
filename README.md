@@ -35,6 +35,8 @@ hub: true
 ---
 -->
 
+**日本語** | [English](README.en.md)
+
 # Async RPC Failure Simulator – 非同期RPCにおける設計誤りの再現シミュレーター
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-async--rpc--failure--simulator-black?logo=github)](https://github.com/ipusiron/async-rpc-failure-simulator)
