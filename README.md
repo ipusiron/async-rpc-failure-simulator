@@ -715,87 +715,88 @@ sequenceDiagram
 
 | ファイル | 役割 |
 |---------|------|
-| `secure_client.py` | 堅牢化されたMCPクライアント実装（ライブラリ） |
-| `scenarios_test_secure.py` | 堅牢な実装を使ったテストシナリオ（実行スクリプト） |
+| `client.py` | 共有の土台（`StdioClient`）。`discard_orphans`フラグで、ID生成とorphanの扱いを切り替える |
+| `scenarios_test.py` | `discard_orphans=False`（観測・保存）でのテストシナリオ |
+| `secure_client.py` | `discard_orphans=True`（破棄＋乱数ID）の薄いラッパー（`SecureStdioMcpClient`）。タイムアウト範囲の警告を加える |
+| `scenarios_test_secure.py` | `SecureStdioMcpClient`を使ったテストシナリオ |
+
+脆弱版と堅牢版で実装を分けているわけではなく、**同じ`client.py`をフラグで切り替えている**のが要点です。
+
+### client.py のコア処理（フラグで切り替わる部分）
+
+```python
+# ID生成：破棄ポリシーなら暗号論的乱数、そうでなければ連番
+def _issue_id(self):
+    if self.discard_orphans:
+        return secrets.token_hex(16)   # 予測不可能
+    self._next_id += 1
+    return self._next_id               # 1, 2, 3...（予測可能）
+
+# 応答受信：対応する待機要求がなければ orphan として扱う
+def _accept(self, data):
+    ...
+    future = self._pending.pop(response_id, None)
+    if future is None or future.done():
+        self.stats["orphans_observed"] += 1
+        if self.discard_orphans:
+            self.stats["orphans_discarded"] += 1   # 件数だけ記録して破棄
+        else:
+            self.orphan_responses.append(data)      # 観測用に保存（再利用可能で危険）
+        self.orphan_event.set()
+        return
+    ...
+
+# 同期リクエスト：タイムアウトを検証し、finally で必ず台帳から削除（TOCTOU対策）
+def request(self, method, params, timeout=5.0):
+    if ...timeout が有限かつ正でなければ...:
+        raise ValueError("Timeout must be finite and greater than zero")
+    request_id, future = self.send_request(method, params)
+    try:
+        return future.result(timeout=timeout)
+    finally:
+        self._remove_pending(request_id, future)
+```
+
+**フラグで切り替わる3点**:
+1. **ID生成**: `discard_orphans`なら`secrets.token_hex(16)`で予測不可能、そうでなければ連番
+2. **orphanの扱い**: `discard_orphans`なら件数だけ記録して破棄、そうでなければ`orphan_responses`に保存（再利用可能で危険）
+3. **台帳の後始末**: `request()`は`finally`で必ず`_remove_pending`を呼び、タイムアウト時に宙に浮いた状態を残さない
 
 ### secure_client.py のコア処理
 
 ```python
-class SecureStdioMcpClient:
-    """堅牢化されたMCPクライアント"""
+class SecureStdioMcpClient(StdioClient):
+    def __init__(self, python_exe, server_script):
+        super().__init__(python_exe, server_script, discard_orphans=True)
 
-    def _issue_id(self) -> str:
-        """【堅牢化1】暗号論的乱数でIDを生成"""
-        return secrets.token_hex(16)  # 128ビットの予測不可能なID
-
-    def _reader_loop(self):
-        """サーバーからのレスポンスを読み取るスレッド"""
-        for line in self.process.stdout:
-            data = json.loads(line)
-            resp_id = data.get("id")
-
-            with self._lock:
-                fut = self._pending.get(resp_id)
-
-            if fut is None:
-                # 【堅牢化2】orphanは保存せず破棄
-                self.stats["orphans_discarded"] += 1
-                log_security("WARN", f"Orphan response を破棄: id={resp_id}")
-                continue  # ← リストに追加しない
-
-            fut.set_result(data)
-
-    def request(self, method: str, params: dict, timeout: float = None) -> dict:
-        """同期リクエスト（タイムアウト検証付き）"""
-        # 【堅牢化3】タイムアウト範囲チェック
-        if timeout < MIN_TIMEOUT:
-            log_security("WARN", f"タイムアウトが短すぎます")
-        elif timeout > MAX_TIMEOUT:
-            log_security("WARN", f"タイムアウトが長すぎます")
-
-        request_id, fut = self.send_request(method, params)
-        try:
-            return fut.result(timeout=timeout)
-        finally:
-            # 必ず台帳から削除（TOCTOU対策）
-            with self._lock:
-                self._pending.pop(request_id, None)
+    def request(self, method, params, timeout=None):
+        if timeout is None:
+            timeout = DEFAULT_TIMEOUT
+        # 範囲外は警告だけ（値は強制しない）
+        if type(timeout) in (int, float) and (timeout < MIN_TIMEOUT or timeout > MAX_TIMEOUT):
+            log_security("WARN", "Timeout is outside the recommended 0.1-30 s range; not clamped.")
+        return super().request(method, params, timeout)
 ```
 
-**3つの堅牢化ポイント**:
-1. **`_issue_id()`**: `secrets.token_hex(16)`で予測不可能なIDを生成
-2. **`_reader_loop()`**: orphan responseをリストに保存せず、ログ出力後に破棄
-3. **`request()`**: タイムアウト値の範囲チェックと、`finally`での確実な台帳削除
+`secure_client.py`は`discard_orphans=True`を指定し、タイムアウトが推奨範囲（0.1〜30秒）の外なら警告を出すだけの薄いラッパーです。警告は値を変更しません。
 
 ### scenarios_test_secure.py のコア処理
 
+`scenarios_test.py`と同じシナリオ関数を`SecureStdioMcpClient`で実行します。タイムアウト→orphanのシナリオでは、破棄ポリシーなので`orphans_discarded`が増え、`orphan_responses`には何も残らないことを確認します。
+
 ```python
-def scenario_timeout_orphan_secure(client: SecureStdioMcpClient):
-    """SCENARIO 4: タイムアウト → orphan破棄の確認"""
-
-    orphans_before = client.stats["orphans_discarded"]  # 破棄数を記録
-
-    try:
-        # 短いタイムアウト（0.05秒）で300ms待つツールを呼び出し
-        client.request("tools/call", {
-            "name": "sleep_ms",
-            "arguments": {"ms": 300}
-        }, timeout=0.05)
-    except FutureTimeoutError:
-        print("[PASS] TimeoutError を観測")
-
-    time.sleep(0.4)  # orphanが到着するのを待つ
-
-    orphans_after = client.stats["orphans_discarded"]
-
-    if orphans_after > orphans_before:
-        # orphanは「破棄数」としてカウントされ、リストには保存されない
-        print(f"[PASS] orphan response を破棄（カウント: {orphans_before} → {orphans_after}）")
+# scenarios_test.py の該当アサーション（抜粋）
+if client.discard_orphans:
+    check(not client.orphan_responses and after["orphans_discarded"] == 1,
+          "orphan payload discarded")
+else:
+    check(len(client.orphan_responses) == 1,
+          "orphan retained only for observation")
 ```
 
-**脆弱な実装との違い**:
-- 脆弱版: `client.orphan_responses`リストに保存 → 再利用可能で危険
-- 堅牢版: `client.stats["orphans_discarded"]`でカウントのみ → 再利用不可
+**方針による違い**:
+- 観測・保存（`discard_orphans=False`）: `orphan_responses`に保存 → 再利用可能で危険
+- 破棄（`discard_orphans=True`）: `orphans_discarded`で件数のみ → 再利用不可
 
 ### 実行方法
 
@@ -836,11 +837,9 @@ Random IDs are not authentication. Timeout warnings do not prevent DoS.
 このシミュレーターが再現するのはクライアント側の症状だけです。「タイムアウトしたのにサーバーは処理を続ける」という非同期の性質（SCENARIO 4）は同じ構造ですが、資源枯渇の本体はサーバー側で起きます。そのため、クライアント側のタイムアウト範囲チェックはこの攻撃の緩和策にはなりません。
 
 ```python
-# secure_client.py のタイムアウト範囲チェックは「警告」だけを出す（値は強制しない）
-if timeout < MIN_TIMEOUT:
-    log_security("WARN", f"タイムアウトが短すぎます: {timeout}s < {MIN_TIMEOUT}s")
-elif timeout > MAX_TIMEOUT:
-    log_security("WARN", f"タイムアウトが長すぎます: {timeout}s > {MAX_TIMEOUT}s")
+# secure_client.py：範囲外は警告だけ（値は強制しない）
+if type(timeout) in (int, float) and (timeout < MIN_TIMEOUT or timeout > MAX_TIMEOUT):
+    log_security("WARN", "Timeout is outside the recommended 0.1-30 s range; not clamped.")
 ```
 
 | 区分 | 内容 |
@@ -851,9 +850,9 @@ elif timeout > MAX_TIMEOUT:
 
 **実験結果との対応**:
 ```
-[WARN] [SECURITY] タイムアウトが短すぎます: 0.05s < 0.1s
+[WARN] Timeout is outside the recommended 0.1-30 s range; not clamped.
 ```
-→ 0.05秒という極端に短いタイムアウトに対して警告を出力します。これは異常値に気づくための運用上の目印であって、Rapid Reset攻撃そのものを止める機能ではありません。
+→ 推奨範囲（0.1〜30秒）の外のタイムアウトに対して警告を出力します。これは異常値に気づくための運用上の目印であって、Rapid Reset攻撃そのものを止める機能ではありません。
 
 ---
 
@@ -864,25 +863,29 @@ elif timeout > MAX_TIMEOUT:
 **堅牢な実装での対策**:
 
 ```python
-# secure_client.py でのorphan破棄
-if fut is None:
-    self.stats["orphans_discarded"] += 1
-    log_security("WARN", f"Orphan response を破棄: id={resp_id}")
-    continue  # ← 保存しない（再利用不可）
+# client.py の _accept：discard_orphans=True なら保存せず件数だけ記録
+if future is None or future.done():
+    self.stats["orphans_observed"] += 1
+    if self.discard_orphans:
+        self.stats["orphans_discarded"] += 1   # ← 保存しない（再利用不可）
+    else:
+        self.orphan_responses.append(data)      # ← 観測用に保存（再利用可能で危険）
+    self.orphan_event.set()
+    return
 ```
 
 | 対策ポイント | 効果 |
 |-------------|------|
-| orphanを即座に破棄 | 「前のレスポンスが次のリクエストに紛れ込む」状況を根本的に防止 |
-| 破棄時のログ出力 | 異常な頻度でorphanが発生していないか監視可能 |
-| 統計カウンター | `stats["orphans_discarded"]`でorphan発生率を定量化 |
+| orphanを保存しない | 「前のレスポンスが次のリクエストに紛れ込む」状況を根本的に防止 |
+| `orphans_observed` / `orphans_discarded` の統計 | 異常な頻度でorphanが発生していないか監視可能 |
+| 件数のみ記録 | ペイロードを残さないので再利用できない |
 
 **実験結果との対応**:
 ```
-[WARN] [SECURITY] Orphan response を破棄: id=b484ad0e0b5711d26bdcaed2676e8832
-[PASS] orphan response を破棄（カウント: 0 → 1）
+[PASS] orphan payload discarded
+STATS {... 'orphans_discarded': 1 ...}
 ```
-→ orphanが発生した事実を記録しつつ、再利用可能なリストには保存しない。desyncで問題となる「レスポンスの紛れ込み」が構造的に発生しません。
+→ orphanが発生した件数は統計に残しつつ、再利用可能なリストには保存しません。desyncで問題となる「レスポンスの紛れ込み」が構造的に発生しません。
 
 ---
 
@@ -893,9 +896,12 @@ if fut is None:
 **堅牢な実装での対策**:
 
 ```python
-# secure_client.py での暗号論的乱数ID生成
-def _issue_id(self) -> str:
-    return secrets.token_hex(16)  # 128ビットの暗号論的乱数
+# client.py の _issue_id：discard_orphans なら暗号論的乱数、そうでなければ連番
+def _issue_id(self):
+    if self.discard_orphans:
+        return secrets.token_hex(16)  # 128ビットの予測不可能なID
+    self._next_id += 1
+    return self._next_id              # 連番（予測可能）
 ```
 
 | 対策ポイント | 効果 |
@@ -904,14 +910,6 @@ def _issue_id(self) -> str:
 | 文字列型ID | 整数オーバーフローの心配がない |
 | 衝突確率 2^-128 | 実質的にIDの重複・衝突は発生しない |
 
-**コードでの違い**:
-```python
-# 脆弱な実装（client.py）: 連番
-self._next_id += 1     # → 1, 2, 3...（次は予測可能）
-
-# 堅牢な実装（secure_client.py）: 暗号論的乱数
-secrets.token_hex(16)  # → "a3f8c9e1..."（予測不可能）
-```
 → 連番だと攻撃者が「次のIDは7だろう」と推測して偽レスポンスを注入できますが、暗号論的乱数のIDは推測できません。CLIのテスト出力は簡潔化してID値を表示しませんが、Web UIでは両者のIDを並べて視覚的に比較できます。
 
 ---
@@ -923,28 +921,24 @@ secrets.token_hex(16)  # → "a3f8c9e1..."（予測不可能）
 **堅牢な実装での対策**:
 
 ```python
-# secure_client.py でのpending台帳管理
-def request(self, method: str, params: dict, timeout: float = None) -> dict:
+# client.py の request：成否にかかわらず finally で必ず台帳から削除
+def request(self, method, params, timeout=5.0):
     ...
+    request_id, future = self.send_request(method, params)
     try:
-        return fut.result(timeout=timeout)
-    except FutureTimeoutError:
-        self.stats["timeouts"] += 1
-        raise
+        return future.result(timeout=timeout)
     finally:
-        with self._lock:
-            self._pending.pop(request_id, None)  # ← 必ず台帳から削除
+        self._remove_pending(request_id, future)  # ← 必ず台帳から削除
 ```
 
 | 対策ポイント | 効果 |
 |-------------|------|
-| `finally`ブロックでの確実な削除 | 例外発生時も台帳から確実に削除 |
+| `finally`での確実な削除 | 例外・タイムアウト時も台帳から確実に削除 |
 | ロック（`self._lock`）の使用 | 複数スレッドからの同時アクセスでも整合性を維持 |
-| タイムアウト時の即座の削除 | 「宙に浮いた状態」の時間を最小化 |
+| 完了したFutureのコールバックでも削除 | `add_done_callback`で`_remove_pending`を呼び、取りこぼしを防ぐ |
 
 **TOCTOU攻撃への耐性**:
-- 脆弱な実装: タイムアウト後もpending台帳にIDが残る可能性 → 攻撃者がそのIDで偽レスポンスを送る余地
-- 堅牢な実装: タイムアウト即座に台帳から削除 → 攻撃のタイミングウィンドウを最小化
+- 保存ポリシーでも破棄ポリシーでも、`request()`はタイムアウト時に台帳からIDを削除する → 「宙に浮いた状態」の時間を最小化する
 
 ---
 
@@ -955,21 +949,20 @@ def request(self, method: str, params: dict, timeout: float = None) -> dict:
 **堅牢な実装での対策**:
 
 ```python
-# secure_client.py でのセキュリティログ分離
-def log_security(level: str, msg: str):
-    """セキュリティ関連のログ出力"""
-    print(f"[{level}] [SECURITY] {msg}", file=sys.stderr)
+# secure_client.py のセキュリティログは stdout を汚さず stderr へ出す
+def log_security(level, message):
+    print(f"[{level}] {message}", file=sys.stderr)
 ```
 
 | 対策ポイント | 効果 |
 |-------------|------|
-| セキュリティログの分離 | 通常ログとセキュリティイベントを区別 |
-| stderr への出力 | stdout（JSON専用）を汚染しない |
-| 明確なプレフィックス `[SECURITY]` | ログ解析時にセキュリティイベントを抽出しやすい |
+| ログをstderrへ出力 | stdout（JSON専用）を汚染しない |
+| レベル付き（`[WARN]`など） | 通常ログとセキュリティ上の注意を区別できる |
+| プロトコル層とツール層のエラーを区別 | SCENARIO 3のとおり、層ごとのエラーを取り違えない |
 
 **Confusion Attacks防止の観点**:
-- 「どの層で何が起きたか」を明確にログに残すことで、セマンティクスの混同を検知可能
-- 例: orphan発生 → プロトコル層の問題、ツールエラー → アプリ層の問題、と区別できる
+- 「どの層で何が起きたか」を区別して扱うことで、セマンティクスの混同を避けられる
+- 例: 存在しないツール → プロトコル層エラー（`-32602`）、引数の値が不正 → ツール層エラー（`result.isError`）
 
 ---
 
@@ -978,10 +971,10 @@ def log_security(level: str, msg: str):
 | CVE/攻撃シナリオ | 脆弱な実装での問題 | 堅牢な実装での対策 | 実験での確認 |
 |-----------------|-------------------|-------------------|-------------|
 | HTTP/2 Rapid Reset | タイムアウト制限なし | 範囲外を警告のみ（緩和はサーバー側） | `[WARN] Timeout is outside the recommended 0.1-30 s range; not clamped.` |
-| レスポンス取り違え（HTTP desync） | orphanをリストに保存 | orphanを即座に破棄 | `orphans_discarded: 1`（`[PASS] orphan payload discarded`） |
+| レスポンス取り違え（HTTP desync） | orphanをリストに保存 | orphanを保存せず件数のみ記録 | `orphans_discarded: 1`（`[PASS] orphan payload discarded`） |
 | CryptoNote ID予測 | 連番ID（1,2,3...） | 暗号論的乱数ID | `secrets.token_hex(16)`（Web UIで可視化） |
 | Juniper TOCTOU | 台帳削除が不確実 | finally + lock | `[PASS] timed-out request removed from pending` |
-| Confusion Attacks | ログ分離なし | `[SECURITY]`プレフィックス | stderrに分離出力 |
+| Confusion Attacks | ログがstdoutに混在 | レベル付きログをstderrへ | SCENARIO 3のエラー層の区別 |
 
 ---
 
@@ -1040,7 +1033,7 @@ def log_security(level: str, msg: str):
 
 | 原則 | 実装方法 |
 |------|----------|
-| **orphanは即座に破棄** | 台帳にないIDのレスポンスはログ出力後に捨てる |
+| **orphanは即座に破棄** | 台帳にないIDのレスポンスは件数だけ記録してペイロードは捨てる |
 | **request_idは暗号論的乱数** | UUID v4やCSPRNGで生成し、予測不可能にする |
 | **タイムアウトは固定値** | 外部入力でタイムアウト値を変更させない |
 | **エラー種別を明確に分離** | プロトコルエラーはリトライ、ツールエラーはユーザーに通知 |
@@ -1050,7 +1043,7 @@ def log_security(level: str, msg: str):
 
 ### 脆弱な実装 vs 堅牢な実装（コード比較）
 
-本リポジトリには「脆弱な実装」と「堅牢な実装」の両方が含まれています。
+本リポジトリは同じ`client.py`を`discard_orphans`フラグで切り替え、観測・保存ポリシーと破棄ポリシーの両方を試せます。
 
 #### 実行方法
 
@@ -1064,41 +1057,34 @@ def log_security(level: str, msg: str):
 
 #### コード差分
 
-| 観点 | 脆弱な実装（`scenarios_test.py`） | 堅牢な実装（`secure_client.py`） |
+| 観点 | 観測・保存（`discard_orphans=False`） | 破棄（`discard_orphans=True`） |
 |------|----------------------------------|----------------------------------|
 | **request_id生成** | `self._next_id += 1`（連番） | `secrets.token_hex(16)`（暗号論的乱数） |
 | **orphan response** | `self.orphan_responses.append(data)`（保存） | `stats["orphans_discarded"] += 1`（破棄） |
-| **タイムアウト** | 引数をそのまま使用 | 範囲チェック（MIN/MAX外は警告） |
-| **統計情報** | なし | `get_stats()`で取得可能 |
+| **タイムアウト** | `client.py`が有限・正の値を検証 | `secure_client.py`が範囲外を警告（値は変更しない） |
+| **統計情報** | `get_stats()`で取得 | `get_stats()`で取得（`orphans_discarded`が増える） |
 
 #### ID生成の比較
 
 ```python
-# 脆弱な実装（scenarios_test.py:87-90）
-def _issue_id(self) -> int:
-    with self._lock:
-        self._next_id += 1
-        return self._next_id  # → 1, 2, 3...（予測可能）
-
-# 堅牢な実装（secure_client.py）
-def _issue_id(self) -> str:
-    return secrets.token_hex(16)  # → "a3f8c9e1..."（予測不可能）
+# client.py の _issue_id：フラグ1つで連番/乱数を切り替える
+def _issue_id(self):
+    if self.discard_orphans:
+        return secrets.token_hex(16)  # → "a3f8c9e1..."（予測不可能）
+    self._next_id += 1
+    return self._next_id              # → 1, 2, 3...（予測可能）
 ```
 
 #### orphan処理の比較
 
 ```python
-# 脆弱な実装（scenarios_test.py:120-123）
-if fut is None:
-    # 台帳にない -> orphan（タイムアウト後の遅延レスポンス等）
-    self.orphan_responses.append(data)  # ← 保存（再利用可能で危険）
-    continue
-
-# 堅牢な実装（secure_client.py）
-if fut is None:
-    self.stats["orphans_discarded"] += 1
-    log_security("WARN", f"Orphan response を破棄: id={resp_id}")
-    continue  # ← 保存しない（再利用不可）
+# client.py の _accept：フラグで保存/破棄を切り替える
+if future is None or future.done():
+    self.stats["orphans_observed"] += 1
+    if self.discard_orphans:
+        self.stats["orphans_discarded"] += 1   # ← 件数だけ記録（再利用不可）
+    else:
+        self.orphan_responses.append(data)      # ← 保存（再利用可能で危険）
 ```
 
 #### 堅牢な実装の出力例
@@ -1221,9 +1207,9 @@ Random IDs are not authentication. Timeout warnings do not prevent DoS.
 
 ## 🌐 Web UIで視覚的に理解する
 
-ブラウザ上で脆弱な実装と堅牢な実装の違いを視覚的に確認できるWeb UIを提供しています。
+ブラウザー上で「観測用に保存」と「破棄」の2つの方針を左右に並べて比較できるWeb UIを用意しています。日本語と英語を切り替えられます。
 
-> **注意**: このWeb UIは**シミュレーション（疑似実行）**です。実際のMCPサーバーやテストプログラムは実行せず、JavaScriptで事前定義されたシナリオデータをアニメーション表示しています。実際の通信を確認したい場合は、CLIで`scenarios_test.py`または`scenarios_test_secure.py`を実行してください。
+> **注意**: このWeb UIは**固定教材の再生**です。Pythonサーバーやネットワークには接続しません。時刻・ID・件数はモデル値で、実測値ではありません。実際の通信を確認したい場合は、CLIで`scenarios_test.py`または`scenarios_test_secure.py`を実行してください。
 
 ### 起動方法
 
@@ -1231,155 +1217,69 @@ Random IDs are not authentication. Timeout warnings do not prevent DoS.
 ./venv/bin/python web/server.py
 ```
 
-ブラウザで `http://localhost:8080` が自動的に開きます。
+ブラウザーで `http://localhost:8080` が開きます。ポートは引数で変更できます（例: `web/server.py 8081`）。
 
 ### 画面構成
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                  Async RPC Failure Simulator                        │
-│             非同期RPCの失敗モードを視覚的に理解する                    │
-├─────────────────────────────────────────────────────────────────────┤
-│  [脆弱な実装を実行]    [堅牢な実装を実行]    [クリア]                  │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   脆弱な実装                    │    堅牢な実装                      │
-│  ┌─────────────────────────┐   │   ┌─────────────────────────┐    │
-│  │ Client      Server     │   │   │ Client      Server     │    │
-│  │   │           │        │   │   │   │           │        │    │
-│  │   ├──request──→│ id=1   │   │   │   ├──request──→│ id=a3f8│    │
-│  │   │←─response──┤        │   │   │   │←─response──┤        │    │
-│  │   │           │        │   │   │   │           │        │    │
-│  │   ├──request──→│ id=5   │   │   │   ├──request──→│ id=b484│    │
-│  │   │  TIMEOUT! │        │   │   │   │  TIMEOUT! │        │    │
-│  │   │←─ORPHAN───┤ 保存!  │   │   │   │←─ORPHAN───┤ 破棄!  │    │
-│  └─────────────────────────┘   │   └─────────────────────────┘    │
-│                                                                     │
-│  統計: orphan保存数: 1 (危険)  │   統計: orphan破棄数: 1 (安全)     │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+- **上部**: タイトルと、右上の日英切り替えボタン（English / 日本語）
+- **操作ボタン**: 「観測用に保存を再生」「破棄を再生」「停止してクリア」
+- **左右のパネル**: 「観測用に保存」と「破棄」を並べて表示する。各パネルはクライアントとサーバーの2列で、0msから1000msまでのやり取りを時系列で描く
+- **モデルの件数**: 各パネルの下に、要求送信・要求に対応した応答・タイムアウト・遅延応答の保存／破棄の件数を表示する
+- **方針と限界**: 2つの方針の違い（要求ID・対応のない応答・Pythonの待機時間）の表と、「この教材が保証しないこと」
 
-### 視覚化される要素
+> ![Web UIで「観測用に保存 vs 破棄」を比較](assets/screenshot2.png)
 
-| 要素 | 色 | 説明 |
-|-----|-----|------|
-| リクエスト | 青（→） | クライアントからサーバーへの送信 |
-| レスポンス | 緑（←） | サーバーからクライアントへの応答 |
-| タイムアウト | 赤 | クライアント側でのタイムアウト発生 |
-| Orphan（脆弱） | オレンジ | タイムアウト後の遅延レスポンス（保存される） |
-| Orphan（堅牢） | 緑 | タイムアウト後の遅延レスポンス（破棄される） |
+### 2つの方針の違い
 
-### 使い方
+| 観察ポイント | 観測用に保存 | 破棄 |
+|-------------|------------|------|
+| 要求ID | 連番。IDの一致で対応づける | ランダムIDの表記例。認証にはならない |
+| 対応のない応答（orphan） | 観測用に最大100件保存。再割当てしない | 内容を保持せず件数を記録 |
+| Pythonの待機時間 | 有限の正数を指定 | 0.1〜30秒の範囲外は警告（値は変更しない） |
 
-1. **サーバー起動**: `./venv/bin/python web/server.py` を実行
-2. **ブラウザで開く**: 自動的に `http://localhost:8080` が開く（開かない場合は手動で）
-3. **実行ボタンをクリック**: 「脆弱な実装を実行」または「堅牢な実装を実行」
-4. **アニメーションを観察**: リクエスト→レスポンスの流れが時系列で表示される
-5. **統計情報を確認**: 実行完了後、下部に統計が表示される
-6. **両方を比較**: 両方実行して左右を見比べる
+1000msの行で、保存は「遅延応答を保存」、破棄は「遅延応答を破棄」と表示されます。どちらも「対応する待機要求なし（orphan）」である点は同じです。
 
-### 画面の見方
+### この教材が保証しないこと
 
-```
-┌────────────────────────────────────────────────────────────────┐
-│ 0ms    ├──initialize──→         id=1          │ ← 時刻とID     │
-│        │      ↑                   ↑           │                │
-│        │   ラベル（メソッド名）  リクエストID  │                │
-├────────────────────────────────────────────────────────────────┤
-│ 100ms  │←──serverInfo──┤         id=1          │ ← レスポンス   │
-│        │      ↑                               │                │
-│        │   矢印が逆向き（←）= サーバーからの応答  │                │
-├────────────────────────────────────────────────────────────────┤
-│ 750ms  │  ⚠️ TimeoutError (50ms)              │ ← タイムアウト │
-│        │      ↑                               │                │
-│        │   赤背景 = クライアント側で待機を諦めた │                │
-├────────────────────────────────────────────────────────────────┤
-│ 1050ms │←─Orphan! 保存される─┤    id=5        │ ← orphan発生   │
-│        │      ↑                               │                │
-│        │   オレンジ = 危険（脆弱な実装）        │                │
-│        │   緑 = 安全（堅牢な実装で破棄）        │                │
-└────────────────────────────────────────────────────────────────┘
-```
-
-### 注目すべき違い
-
-| 観察ポイント | 脆弱な実装 | 堅牢な実装 | 意味 |
-|-------------|-----------|-----------|------|
-| **request_id** | `id=1`, `id=2`, `id=3`... | `id=a3f8c9...`, `id=7b2d4f...` | 連番は予測可能で危険 |
-| **orphanの色** | オレンジ（警告色） | 緑（安全色） | 保存 vs 破棄の違い |
-| **orphanのラベル** | 「保存される」 | 「破棄!」 | 再利用可能かどうか |
-| **統計の表示** | `orphan保存数: 1`（赤字） | `orphan破棄数: 1`（緑字） | 危険 vs 安全 |
+Web UIにも明記しているとおり、本教材は送信元の認証、アクセス制御、サーバー側の処理中止、一般的なDoS対策を提供しません。IDの乱数化やstderrへのログ分離だけで攻撃を防げるわけではありません。保存するだけで情報漏洩が起こるとは限らず、別の利用者へ公開したり別のリクエストに再利用したりする設計が問題になります。
 
 ### Web UIを使った学習ステップ
 
-#### ステップ1: まず脆弱な実装を観察
-
-1. 「脆弱な実装を実行」をクリック
-2. IDが `1, 2, 3...` と連番になっていることを確認
-3. 最後にオレンジ色の「Orphan! 保存される」が表示されることを確認
-4. 統計で「orphan保存数: 1」が赤字で表示されることを確認
-
-**気づくべきこと**:
-- 攻撃者は「次のIDは6だ」と予測できる
-- orphanがリストに保存され、後で再利用される可能性がある
-
-#### ステップ2: 堅牢な実装と比較
-
-1. 「堅牢な実装を実行」をクリック
-2. IDが `a3f8c9...`, `7b2d4f...` とランダムになっていることを確認
-3. 最後に緑色の「Orphan 破棄!」が表示されることを確認
-4. 統計で「orphan破棄数: 1」が緑字で表示されることを確認
-
-**気づくべきこと**:
-- 攻撃者は次のIDを予測できない
-- orphanは破棄され、再利用できない
-
-#### ステップ3: 左右を見比べて違いを言語化
-
-両方の実行結果を並べて、以下の質問に答えてみてください：
-
-1. **なぜ連番IDは危険か？**
-   → 攻撃者が次のIDを予測し、偽のレスポンスを注入できるから
-
-2. **なぜorphanを保存すると危険か？**
-   → 後続のリクエストに誤って紐づけられ、情報漏洩につながるから
-
-3. **堅牢な実装は何を変えたか？**
-   → ID生成を暗号論的乱数に、orphanを保存ではなく破棄に
+1. 「観測用に保存を再生」と「破棄を再生」をそれぞれ実行し、左右のパネルを見比べる
+2. 0ms〜700msは両者が同じで、750msでタイムアウト、1000msで遅延応答（orphan）が届く流れを追う
+3. 1000msの行で、保存は遅延応答を観測用にためること、破棄は件数だけ記録して中身を捨てることを確認する
+4. 「方針と限界」で、連番IDとランダムIDの違い、待機時間が警告のみで強制されないことを確認する
 
 ### よくある質問
 
 **Q: 実際のMCPサーバーと通信しているの？**
 
-A: **いいえ、していません。** Web UIは完全なシミュレーション（疑似実行）です。
+A: **いいえ、していません。** Web UIは固定教材の再生です。
 
 | 項目 | Web UI | CLIテスト |
 |------|--------|----------|
 | MCPサーバー起動 | しない | する |
 | 実際の通信 | しない | する |
-| データソース | JavaScript内の固定データ | 実際のリクエスト/レスポンス |
+| データソース | 固定のモデル値 | 実際のリクエスト/レスポンス |
 | 用途 | 概念の視覚的理解 | 実際の動作確認 |
 
 実際の通信を確認したい場合：
 ```bash
-# 脆弱な実装（実際に通信する）
 ./venv/bin/python mcp/scenarios_test.py
-
-# 堅牢な実装（実際に通信する）
 ./venv/bin/python mcp/scenarios_test_secure.py
 ```
 
 **Q: ポート8080が使えない場合は？**
 
-A: 別のポートを指定できます：
+A: 別のポートを指定できます。
+
 ```bash
 ./venv/bin/python web/server.py 8081
 ```
 
-**Q: 自分のシナリオを追加できる？**
+**Q: 表示を英語にできる？**
 
-A: `web/index.html` 内の `scenarios` オブジェクトを編集することで、カスタムシナリオを追加できます。
+A: 画面右上の「English」ボタンで日本語と英語を切り替えられます。選んだ言語はブラウザーに記憶されます。
 
 ---
 
@@ -1472,20 +1372,29 @@ Challenge 1: Orphan Response Hijacking - 模範解答
 
 ```
 async-rpc-failure-simulator/
-├── README.md                      # 本ドキュメント
+├── README.md                      # 本ドキュメント（日本語）
 ├── CLAUDE.md                      # Claude Code向けガイド
 ├── LICENSE                        # MITライセンス
 ├── .gitignore
 ├── .nojekyll                      # GitHub Pages用（Jekyll無効化）
 │
+├── .github/
+│   └── workflows/
+│       └── test.yml               # CI（3テストをubuntu/Python3.11で実行）
+│
 ├── mcp/                           # MCP実装（本体）
 │   ├── demo_server.py             #   MCPサーバー（stdio transport、Inspector互換）
-│   ├── scenarios_test.py          #   失敗モード再現テスト（脆弱な実装）
-│   ├── secure_client.py           #   堅牢なクライアント実装
-│   └── scenarios_test_secure.py   #   堅牢版テストシナリオ
+│   ├── client.py                  #   共有クライアント（discard_orphansフラグで保存/破棄を切替）
+│   ├── scenarios_test.py          #   観測・保存ポリシーでのシナリオテスト
+│   ├── secure_client.py           #   破棄ポリシーの薄いラッパー＋タイムアウト警告
+│   └── scenarios_test_secure.py   #   破棄ポリシーでのシナリオテスト
 │
 ├── web/                           # Web UI（視覚化ツール）
-│   ├── index.html                 #   メインページ（HTML/CSS/JS）
+│   ├── index.html                 #   メインページ（マークアップ）
+│   ├── style.css                  #   スタイル
+│   ├── core.js                    #   シナリオ再生のロジック
+│   ├── messages.js                #   日英の文言辞書
+│   ├── app.js                     #   画面描画と日英切り替え
 │   └── server.py                  #   Webサーバー（標準ライブラリのみ）
 │
 ├── challenges/                    # CTF形式の攻撃体験チャレンジ
@@ -1493,18 +1402,22 @@ async-rpc-failure-simulator/
 │       ├── README.md              #     詳細な説明書
 │       ├── vulnerable_server.py   #     攻撃対象の脆弱なサーバー
 │       ├── exploit_template.py    #     穴埋め式の攻撃スクリプト（Easyモード）
+│       ├── solution.py            #     模範解答
+│       ├── integration_test.py    #     脆弱版success/安全版failを固定する統合テスト
 │       ├── hint1.txt              #     ヒント1：攻撃の方向性
 │       ├── hint2.txt              #     ヒント2：具体的なテクニック
-│       ├── hint_blackbox.txt      #     ブラックボックス攻撃の手法
-│       └── solution.py            #     模範解答
+│       └── hint_blackbox.txt      #     ブラックボックス攻撃の手法
 │
 ├── docs/                          # スライド・資料保管用
 │   └── Async_Failure_Simulator.pdf #   解説スライド
 │
 └── assets/                        # ドキュメント用画像
     ├── screenshot.png             #   テスト実行結果
-    ├── inspector_demo_server.png
-    └── inspector_demo_server2.png
+    ├── screenshot2.png            #   Web UI（観測用に保存 vs 破棄）日本語
+    ├── screenshot2.en.png         #   Web UI（英語）
+    ├── screenshot_mobile.png      #   Web UI（モバイル幅）
+    ├── inspector_demo_server.png  #   InspectorのResourcesタブ
+    └── inspector_demo_server2.png #   InspectorのToolsタブ
 ```
 
 ---
