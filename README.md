@@ -70,9 +70,9 @@ hub: true
 >
 > *テストプログラムである"scenarios_test.py"ファイルの実行結果*
 
-> ![Web UIで「脆弱 vs 堅牢」比較](assets/screenshot2.png)
+> ![Web UIで「観測用に保存 vs 破棄」を比較](assets/screenshot2.png)
 >
-> *Web UIで「脆弱 vs 堅牢」比較*
+> *Web UIで「観測用に保存 vs 破棄」を比較*
 
 ---
 
