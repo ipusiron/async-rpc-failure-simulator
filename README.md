@@ -57,8 +57,8 @@ hub: true
 - 非同期RPCにおける **request / response の順不同**
 - タイムアウト後に返ってくる **遅延レスポンス（orphan response）**
 - タイムアウトによるpending台帳掃除と、その副作用
-- unknown toolによる **ツール層エラー（`result.isError`）**
-- プロトコル層エラーとアプリ層エラーの違い
+- unknown toolによる **プロトコル層エラー（`-32602`）** と、不正な引数による **ツール層エラー（`result.isError`）** の違い
+- プロトコル層エラーとアプリ層エラーの区別
 
 ※ 攻撃ツールではありません。**設計ミスがセキュリティ事故につながる境界**を学ぶための教材です。
 
@@ -372,37 +372,23 @@ Inspectorの環境構築ではまった場合は以下の記事を参考にし�
 "mcp/scenarios_test.py"ファイルは、失敗ケースを再現するテスト用のMCPクライアントです。
 
 ```
-ipusiron@MHL:~/async-rpc-failure-simulator$ ./venv/bin/python mcp/scenarios_test.py
-
-========================================================================
-SCENARIO 1: Handshake（initialize → initialized通知 → ping）
-========================================================================
-[PASS] initialize 応答OK: {'name': 'async-rpc-failure-simulator', 'version': '0.1.0'}
-[INFO] notifications/initialized を送信
-[PASS] ping 応答OK
-
-========================================================================
-SCENARIO 2: 非同期demux（2リクエストを投げて逆順で回収）
-========================================================================
-[INFO] dispatched id1=3, id2=4
-[PASS] demux 成功: results = 3 42
-
-========================================================================
-SCENARIO 3: ツールレベルエラー（unknown tool → result.isError）
-========================================================================
-[PASS] ツールエラーを検出: Error: Unknown tool no_such_tool
-
-========================================================================
-SCENARIO 4: タイムアウト → 遅延レスポンス（orphan）観測
-========================================================================
-[PASS] TimeoutError を観測（timeout=0.05s, sleep=300ms）
-[PASS] orphan response を観測: {'jsonrpc': '2.0', 'id': 6, 'result': {'content': [{'type': 'text', 'text': 'slept 300 ms'}]}}
-
-========================================================================
-CLEANUP
-========================================================================
-[INFO] サーバー停止
+$ ./venv/bin/python mcp/scenarios_test.py
+[PASS] initialize
+[PASS] ping
+[PASS] request ID correlation
+[PASS] results: 3, 42
+[PASS] completed requests removed from pending
+[PASS] unknown tool: protocol error -32602
+[PASS] invalid tool value: result.isError
+[PASS] late response arrived
+[PASS] one timeout
+[PASS] one orphan response
+[PASS] orphan retained only for observation
+[PASS] timed-out request removed from pending
+STATS {'requests_sent': 7, 'responses_received': 6, 'orphans_observed': 1, 'orphans_discarded': 0, 'timeouts': 1, 'invalid_messages': 0}
 ```
+
+出力は検証用に簡潔化してあり、各`[PASS]`行が下記のシナリオ解説に対応します。IDや統計の詳しい可視化はWeb UIで確認できます。なお`no_such_tool`はプロトコル層エラー（`-32602`）、`sleep_ms`への不正な引数（`ms=-1`）はツール層エラー（`result.isError`）として返り、2種類のエラーを区別します。
 
 ### 各シナリオの詳細解説
 
@@ -491,7 +477,7 @@ resp1 = fut1.result(timeout=5)  # id=3 を後に待つ
 
 ---
 
-#### SCENARIO 3: ツールレベルエラー（result.isError）
+#### SCENARIO 3: プロトコル層エラーとツール層エラーの区別
 
 ```mermaid
 sequenceDiagram
@@ -500,32 +486,35 @@ sequenceDiagram
     participant Server as サーバー
 
     Client->>Server: tools/call("no_such_tool")
+    Server-->>Client: error: {code: -32602, "Unknown tool"}
+    Note left of Server: プロトコル層エラー<br/>（存在しないツール）
 
+    Client->>Server: tools/call("sleep_ms", ms=-1)
     Server-->>Client: result: {isError: true, ...}
-    Note left of Server: JSON-RPC errorではない！<br/>アプリ層のエラー
+    Note left of Server: ツール層エラー<br/>（引数の値が不正）
 ```
 
 **何が起きているか:**
-1. 存在しないツール`no_such_tool`を呼び出す
-2. サーバーは**JSON-RPCのerrorフィールドではなく**、`result.isError`でエラーを返す
+1. 存在しないツール`no_such_tool`を呼ぶと、サーバーは**JSON-RPCのerrorフィールド**（`code: -32602`）で返す。これはプロトコル層のエラーである
+2. 存在するツール`sleep_ms`に不正な引数（`ms=-1`）を渡すと、サーバーは**`result.isError`**で返す。これはツール層（アプリ層）のエラーである
 
 **応答の形式:**
+
+存在しないツール → プロトコル層エラー
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "isError": true,
-    "content": [{"type": "text", "text": "Error: Unknown tool no_such_tool"}]
-  }
-}
+{"jsonrpc": "2.0", "id": 6, "error": {"code": -32602, "message": "Unknown tool"}}
+```
+
+不正な引数の値 → ツール層エラー
+```json
+{"jsonrpc": "2.0", "id": 7, "result": {"isError": true, "content": [{"type": "text", "text": "Invalid arguments"}]}}
 ```
 
 **学習ポイント:**
-- MCPでは「ツール層エラー」と「プロトコル層エラー」を区別している
-- **プロトコル層エラー**（JSON-RPCレベル）: `{"error": {"code": -32601, "message": "..."}}` の形式
-- **ツール層エラー**（MCP/アプリレベル）: `{"result": {"isError": true, ...}}` の形式
-- この区別を誤ると、エラーハンドリングが破綻する（例：ツールエラーをプロトコルエラーとして処理してしまう）
+- MCPでは「プロトコル層エラー」と「ツール層エラー」を区別する
+- **プロトコル層エラー**（JSON-RPCレベル）: `{"error": {"code": ...}}`の形式。本ツールでは存在しないツールの呼び出しが`-32602`で返る
+- **ツール層エラー**（MCP/アプリレベル）: `{"result": {"isError": true, ...}}`の形式。本ツールでは引数の値が不正なときに返る
+- この区別を誤ると、エラーハンドリングが破綻する（例：ツール層エラーをプロトコル層エラーと誤認してリトライし続ける）
 
 ---
 
@@ -685,11 +674,11 @@ sequenceDiagram
     participant Client as クライアント
     participant Server as サーバー
 
-    Client->>Server: 存在しないツール呼び出し<br/>(tools/call: "no_such_tool")
+    Client->>Server: 不正な引数でツール呼び出し<br/>(tools/call: "sleep_ms", ms=-1)
 
-    Server-->>Client: レスポンス (id=5)<br/>Result: { isError: true, ... }
+    Server-->>Client: レスポンス (id=7)<br/>Result: { isError: true, ... }
 
-    Note over Server: ← アプリ層のエラー<br/>（JSON-RPCとしては成功）
+    Note over Server: ← ツール層のエラー<br/>（JSON-RPCとしては成功）
 
     Note over Client: 【脆弱な処理】<br/>「通信エラーだ！」と勘違い
 
@@ -814,88 +803,25 @@ MCPサーバーである"demo_server.py"を起動した状態で、"scenarios_te
 ただし、"secure_client.py"ファイルも配置しておかなければなりません。
 
 ```
-ipusiron@MHL:~/async-rpc-failure-simulator$ ./venv/bin/python mcp/scenarios_test_secure.py
-========================================================================
-堅牢な実装（SecureStdioMcpClient）でのテスト実行
-========================================================================
-
-========================================================================
-SCENARIO 1: Handshake（initialize → initialized通知 → ping）
-========================================================================
-[PASS] initialize 応答OK: {'name': 'async-rpc-failure-simulator', 'version': '0.1.0'}
-[INFO] notifications/initialized を送信
-[PASS] ping 応答OK
-
-========================================================================
-SCENARIO 2: 非同期demux（2リクエストを投げて逆順で回収）
-========================================================================
-[INFO] dispatched id1=cdb4fb09... id2=02d0c6e5...
-[INFO] ↑ IDが暗号論的乱数（連番ではない）ことを確認
-[PASS] demux 成功: results = 3 42
-
-========================================================================
-SCENARIO 3: ツールレベルエラー（unknown tool → result.isError）
-========================================================================
-[PASS] ツールエラーを検出: Error: Unknown tool no_such_tool
-
-========================================================================
-SCENARIO 4: タイムアウト → orphan破棄の確認（堅牢版）
-========================================================================
-[INFO] 脆弱な実装との違い:
-       - 脆弱: orphan_responses リストに保存（再利用可能）
-       - 堅牢: ログ出力して破棄（再利用不可）
-
-[WARN] [SECURITY] タイムアウトが短すぎます: 0.05s < 0.1s
-[PASS] TimeoutError を観測（timeout=0.05s, sleep=300ms）
-[WARN] [SECURITY] Orphan response を破棄: id=b484ad0e0b5711d26bdcaed2676e8832
-[PASS] orphan response を破棄（カウント: 0 → 1）
-[INFO] 堅牢な実装では orphan はリストに保存されず、再利用できない
-
-========================================================================
-SCENARIO 5: 脆弱な実装との比較サマリー
-========================================================================
-
-┌─────────────────────────────────────────────────────────────────────┐
-│ 比較項目            │ 脆弱な実装           │ 堅牢な実装            │
-├─────────────────────────────────────────────────────────────────────┤
-│ request_id生成      │ self._next_id += 1   │ secrets.token_hex()   │
-│                     │ → 1, 2, 3...（予測可）│ → ランダム（予測不可）│
-├─────────────────────────────────────────────────────────────────────┤
-│ orphan response     │ orphan_responses     │ stats["orphans_       │
-│                     │   .append(data)      │   discarded"] += 1    │
-│                     │ → 再利用可能         │ → 破棄（再利用不可）  │
-├─────────────────────────────────────────────────────────────────────┤
-│ タイムアウト検証    │ なし                 │ MIN/MAX範囲チェック   │
-│                     │                      │ → 範囲外は警告        │
-├─────────────────────────────────────────────────────────────────────┤
-│ セキュリティログ    │ なし                 │ log_security() で     │
-│                     │                      │ stderr に出力         │
-└─────────────────────────────────────────────────────────────────────┘
-
-【防止できる攻撃】
-1. ID予測攻撃: 連番だと攻撃者が次のIDを予測し、偽レスポンスを注入可能
-   → 暗号論的乱数で予測不可能に
-
-2. Orphan再利用攻撃: タイムアウト後のレスポンスを別リクエストに紐づけ
-   → 破棄することで再利用を防止
-
-3. タイムアウト操作DoS: 極端に長いタイムアウトでリソース占有
-   → 範囲チェックで抑制
-
-
-========================================================================
-CLEANUP & STATISTICS
-========================================================================
-[INFO] サーバー停止
-
-【統計情報】
-  - リクエスト送信数:    6
-  - レスポンス受信数:    5
-  - タイムアウト発生数:  1
-  - orphan破棄数:        1
-
-[INFO] orphan response は保存されず、安全に破棄されました
+$ ./venv/bin/python mcp/scenarios_test_secure.py
+[WARN] Timeout is outside the recommended 0.1-30 s range; not clamped.
+[PASS] initialize
+[PASS] ping
+[PASS] request ID correlation
+[PASS] results: 3, 42
+[PASS] completed requests removed from pending
+[PASS] unknown tool: protocol error -32602
+[PASS] invalid tool value: result.isError
+[PASS] late response arrived
+[PASS] one timeout
+[PASS] one orphan response
+[PASS] orphan payload discarded
+[PASS] timed-out request removed from pending
+STATS {'requests_sent': 7, 'responses_received': 6, 'orphans_observed': 1, 'orphans_discarded': 1, 'timeouts': 1, 'invalid_messages': 0}
+Random IDs are not authentication. Timeout warnings do not prevent DoS.
 ```
+
+脆弱版との違いは最後に凝縮されます。脆弱版は`orphan retained only for observation`（`orphans_discarded: 0`）、堅牢版は`orphan payload discarded`（`orphans_discarded: 1`）です。範囲外のタイムアウトは`not clamped`＝警告だけで値は強制しません。末尾の一文のとおり、ランダムIDは認証の代わりにならず、タイムアウト警告はDoSを防ぎません（設計上の教訓であって、実際の緩和策ではない）。脆弱版と堅牢版の対比はWeb UIで視覚的に確認できます。
 
 ### 堅牢な実装とCVE・攻撃シナリオの関係
 
@@ -978,21 +904,15 @@ def _issue_id(self) -> str:
 | 文字列型ID | 整数オーバーフローの心配がない |
 | 衝突確率 2^-128 | 実質的にIDの重複・衝突は発生しない |
 
-**実験結果との対応**:
-```
-[INFO] dispatched id1=cdb4fb09... id2=02d0c6e5...
-[INFO] ↑ IDが暗号論的乱数（連番ではない）ことを確認
-```
-→ 連番（1, 2, 3...）ではなくランダムな16進数文字列。攻撃者が「次のIDは7だろう」と推測して偽レスポンスを注入する攻撃が不可能になります。
-
-**脆弱な実装との比較**:
+**コードでの違い**:
 ```python
-# 脆弱な実装（scenarios_test.py）
-[INFO] dispatched id1=3, id2=4  # ← 連番、次は5と予測可能
+# 脆弱な実装（client.py）: 連番
+self._next_id += 1     # → 1, 2, 3...（次は予測可能）
 
-# 堅牢な実装（scenarios_test_secure.py）
-[INFO] dispatched id1=cdb4fb09... id2=02d0c6e5...  # ← 予測不可能
+# 堅牢な実装（secure_client.py）: 暗号論的乱数
+secrets.token_hex(16)  # → "a3f8c9e1..."（予測不可能）
 ```
+→ 連番だと攻撃者が「次のIDは7だろう」と推測して偽レスポンスを注入できますが、暗号論的乱数のIDは推測できません。CLIのテスト出力は簡潔化してID値を表示しませんが、Web UIでは両者のIDを並べて視覚的に比較できます。
 
 ---
 
@@ -1057,10 +977,10 @@ def log_security(level: str, msg: str):
 
 | CVE/攻撃シナリオ | 脆弱な実装での問題 | 堅牢な実装での対策 | 実験での確認 |
 |-----------------|-------------------|-------------------|-------------|
-| HTTP/2 Rapid Reset | タイムアウト制限なし | 範囲外を警告のみ（緩和はサーバー側） | `[WARN] タイムアウトが短すぎます` |
-| レスポンス取り違え（HTTP desync） | orphanをリストに保存 | orphanを即座に破棄 | `orphan破棄数: 1` |
-| CryptoNote ID予測 | 連番ID（1,2,3...） | 暗号論的乱数ID | `id1=cdb4fb09...` |
-| Juniper TOCTOU | 台帳削除が不確実 | finally + lock | 統計情報で追跡可能 |
+| HTTP/2 Rapid Reset | タイムアウト制限なし | 範囲外を警告のみ（緩和はサーバー側） | `[WARN] Timeout is outside the recommended 0.1-30 s range; not clamped.` |
+| レスポンス取り違え（HTTP desync） | orphanをリストに保存 | orphanを即座に破棄 | `orphans_discarded: 1`（`[PASS] orphan payload discarded`） |
+| CryptoNote ID予測 | 連番ID（1,2,3...） | 暗号論的乱数ID | `secrets.token_hex(16)`（Web UIで可視化） |
+| Juniper TOCTOU | 台帳削除が不確実 | finally + lock | `[PASS] timed-out request removed from pending` |
 | Confusion Attacks | ログ分離なし | `[SECURITY]`プレフィックス | stderrに分離出力 |
 
 ---
@@ -1184,31 +1104,15 @@ if fut is None:
 #### 堅牢な実装の出力例
 
 ```
-========================================================================
-SCENARIO 2: 非同期demux（2リクエストを投げて逆順で回収）
-========================================================================
-[INFO] dispatched id1=a3f8c9e1... id2=7b2d4f0a...
-[INFO] ↑ IDが暗号論的乱数（連番ではない）ことを確認
-[PASS] demux 成功: results = 3 42
-
-========================================================================
-SCENARIO 4: タイムアウト → orphan破棄の確認（堅牢版）
-========================================================================
-[WARN] [SECURITY] タイムアウトが短すぎます: 0.05s < 0.1s
-[PASS] TimeoutError を観測（timeout=0.05s, sleep=300ms）
-[WARN] [SECURITY] Orphan response を破棄: id=f9c2e8a1b7d34f6e...
-[PASS] orphan response を破棄（カウント: 0 → 1）
-[INFO] 堅牢な実装では orphan はリストに保存されず、再利用できない
-
-========================================================================
-CLEANUP & STATISTICS
-========================================================================
-【統計情報】
-  - リクエスト送信数:    6
-  - レスポンス受信数:    5
-  - タイムアウト発生数:  1
-  - orphan破棄数:        1
+$ ./venv/bin/python mcp/scenarios_test_secure.py
+[WARN] Timeout is outside the recommended 0.1-30 s range; not clamped.
+...（SCENARIO 1〜4 の [PASS] が続く）
+[PASS] orphan payload discarded
+[PASS] timed-out request removed from pending
+STATS {'requests_sent': 7, 'responses_received': 6, 'orphans_observed': 1, 'orphans_discarded': 1, 'timeouts': 1, 'invalid_messages': 0}
+Random IDs are not authentication. Timeout warnings do not prevent DoS.
 ```
+堅牢版では`orphan payload discarded`となり、`orphans_discarded`が1に増えます（脆弱版は`orphan retained only for observation`で0のまま）。
 
 ---
 
