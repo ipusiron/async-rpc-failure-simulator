@@ -1057,8 +1057,8 @@ def log_security(level: str, msg: str):
 
 | CVE/攻撃シナリオ | 脆弱な実装での問題 | 堅牢な実装での対策 | 実験での確認 |
 |-----------------|-------------------|-------------------|-------------|
-| HTTP/2 Rapid Reset | タイムアウト制限なし | MIN/MAX範囲チェック | `[WARN] タイムアウトが短すぎます` |
-| Apache mod_proxy mixup | orphanをリストに保存 | orphanを即座に破棄 | `orphan破棄数: 1` |
+| HTTP/2 Rapid Reset | タイムアウト制限なし | 範囲外を警告のみ（緩和はサーバー側） | `[WARN] タイムアウトが短すぎます` |
+| レスポンス取り違え（HTTP desync） | orphanをリストに保存 | orphanを即座に破棄 | `orphan破棄数: 1` |
 | CryptoNote ID予測 | 連番ID（1,2,3...） | 暗号論的乱数ID | `id1=cdb4fb09...` |
 | Juniper TOCTOU | 台帳削除が不確実 | finally + lock | 統計情報で追跡可能 |
 | Confusion Attacks | ログ分離なし | `[SECURITY]`プレフィックス | stderrに分離出力 |
@@ -1306,7 +1306,7 @@ CLEANUP & STATISTICS
 | 根本原因 | 該当CVE/事例 |
 |---------|-------------|
 | 非同期処理でリソースのライフサイクル管理が不十分 | HTTP/2 Rapid Reset |
-| レスポンスとリクエストの紐づけ（demux）が不完全 | Apache mod_proxy mixup |
+| レスポンスとリクエストの紐づけ（demux）が不完全 | レスポンス取り違え（HTTP desync） |
 | 認証・認可チェックの層が曖昧 | Bugzilla JSON-RPC CSRF, CryptoNote |
 | 時間差（TOCTOU）を考慮していない | Juniper RPC race condition |
 | コンポーネント間のセマンティクス不整合 | Confusion Attacks |
